@@ -6,8 +6,11 @@ by every skill that touches the `suggestions` / `positions` /
 """
 
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.settings import Settings
 
