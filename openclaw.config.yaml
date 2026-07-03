@@ -1,0 +1,53 @@
+# OpenClaw orchestration config — placeholder scaffold.
+# Real skill/channel bindings get filled in as each phase (see README) lands.
+
+scheduler:
+  # Pre-market run: data fetch + indicator engine + signal skill -> notify skill
+  pre_market_run:
+    enabled: false  # TODO: Phase 3 — enable once Telegram notify skill is wired
+    # cron: ""      # TODO: set once broker/market-hours timezone is finalized
+
+  # Post-market run: same pipeline, end-of-day read
+  post_market_run:
+    enabled: false  # TODO: Phase 3
+    # cron: ""      # TODO: set once broker/market-hours timezone is finalized
+
+  # Light daily/twice-daily monitor check (Claude risk judgment on open positions,
+  # not tight intraday polling — hard SL/target handled by broker GTT/OCO)
+  monitor_check:
+    enabled: false  # TODO: Phase 5 — enable once monitor_skill is implemented
+    # cron: ""      # TODO: align with pre-market/post-market run times
+
+skills:
+  # TODO: Phase 1
+  - name: data_fetch_skill
+    enabled: false
+  # TODO: Phase 1
+  - name: indicator_engine
+    enabled: false
+  # TODO: Phase 2
+  - name: signal_skill
+    enabled: false
+  # TODO: Phase 3 (Telegram), Phase 8 (Discord)
+  - name: notify_skill
+    enabled: false
+  # TODO: Phase 4
+  - name: position_tracker_skill
+    enabled: false
+  # TODO: Phase 5
+  - name: monitor_skill
+    enabled: false
+  # TODO: Phase 6
+  - name: chat_skill
+    enabled: false
+  # TODO: Phase 7 — manual trigger only, not scheduled
+  - name: cleanup_skill
+    enabled: false
+    manual_only: true
+
+channels:
+  telegram:
+    enabled: false  # TODO: Phase 3
+  discord:
+    enabled: false  # TODO: Phase 8
+    # channel_map fills in once Discord IDs are known (see .env.example)

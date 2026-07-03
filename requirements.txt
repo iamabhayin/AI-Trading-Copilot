@@ -1,0 +1,9 @@
+pandas==2.2.3
+pandas-ta==0.3.14b0
+yfinance==0.2.51
+python-dotenv==1.0.1
+anthropic==0.40.0
+requests==2.32.3
+python-telegram-bot==21.9
+discord.py==2.4.0
+pytest==8.3.4
