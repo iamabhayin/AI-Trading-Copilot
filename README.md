@@ -43,13 +43,20 @@ Each phase is its own branch off `develop` (see repo's branching strategy), merg
 |---|---|---|---|
 | 0 | Validation phase — 5-stock watchlist, Ollama for filtering/extraction + Claude Haiku for signal synthesis, paper trading only | Cheap go/no-go gate before real spend or real trading | Skipped |
 | 1 | Data fetch + indicator engine (plain Python, console output) | No OpenClaw yet — validate data pipeline first | ✅ Done — merged into `develop` via PR #1 |
-| 2 | Signal skill with Claude API call | Still console-only, sanity-check suggestions | In progress — `develop` synced into `phase-2-signal-agent` via PR #2 |
-| 3 | Install OpenClaw on VPS, wire Telegram notify skill | First real message delivery | Not started |
+| 2 | Signal skill with Claude API call | Still console-only, sanity-check suggestions | ✅ Done — merged into `develop` via PR #3 |
+| 3 | Install OpenClaw on VPS, wire Telegram notify skill | First real message delivery | ⚠️ Code done on `phase-3-telegram-notify`, not yet merged — see [Pending manual setup](#pending-manual-setup) below (Telegram credentials + VPS install still needed) |
 | 4 | Position tracker (reply parsing → SQLite) | "Bought X" flow working end-to-end | Not started |
 | 5 | Monitor skill (code tripwire + agent risk judgment) | Light daily/twice-daily check, not tight polling | Not started |
 | 6 | Chat skill (conversational Q&A) | Free-form follow-up questions | Not started |
 | 7 | Cleanup skill (manual command) | Final piece | Not started |
 | 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | Not started |
+
+## Pending manual setup
+
+Left for later, deliberately not automated by the assistant:
+
+- **Telegram credentials.** `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `.env` are still empty. Create a bot via [@BotFather](https://t.me/BotFather), get your chat ID, fill in `.env`, then run `python skills/notify_skill.py` to confirm a real message actually arrives — this has only been verified up to the missing-credentials check, not with a live send.
+- **Install OpenClaw on a VPS.** Section 10 of the architecture doc covers the setup guide (Node.js 22+ on the VPS, OpenClaw install, scheduler wiring). This is real infrastructure provisioning outside what can be done from a local dev session — do this once a VPS is available, then flip `scheduler.pre_market_run` / `post_market_run` to `enabled: true` in `openclaw.config.yaml` and set their `cron` values.
 
 ## Notes
 
