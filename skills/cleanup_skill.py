@@ -63,16 +63,14 @@ def format_cleanup_summary(result: dict) -> str:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     from config.startup import StartupService
-    from skills.notify_skill import send_telegram_message
+    from skills.notify_skill import route_message
 
     StartupService().start()
 
     summary = format_cleanup_summary(cleanup())
     print(summary)
     try:
-        asyncio.run(send_telegram_message(summary))
+        route_message("cleanup", summary)
     except ValueError as exc:
         print(f"  (not sent to Telegram: {exc})")

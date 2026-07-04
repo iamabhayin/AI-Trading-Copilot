@@ -11,10 +11,9 @@ once; output is routed to the right destination based on message type — no
 duplicate logic, just a routing layer. Two-way replies need a listener on
 both platforms, both writing to the same SQLite tables.
 
-Phase 3 wires the Telegram half only; Discord routing lands in Phase 8.
+Phase 3 wired the Telegram half; Phase 8 adds Discord as a second,
+routed target reusing the same skill.
 """
-
-# TODO: Phase 8 — add Discord as a second notification target, reusing the same skill
 
 import asyncio
 import sys
@@ -22,12 +21,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import discord
 import requests
 from telegram import Bot
 from telegram.constants import ParseMode
 
 from config.settings import Settings
 from db.database import fetch_one
+
+# Maps a message type to the Config field holding that Discord channel's ID
+# — mirrors the proposed #market-news/#signals/#monitoring/#chat/#closed-trades
+# split. A type with no entry here (or no channel ID configured) just skips
+# Discord and goes to Telegram only.
+DISCORD_CHANNEL_FIELD_BY_TYPE = {
+    "market_news": "discord_channel_market_news",
+    "signal": "discord_channel_signals",
+    "monitoring": "discord_channel_monitoring",
+    "chat": "discord_channel_chat",
+    "closed_trade": "discord_channel_closed_trades",
+}
 
 
 def _template_message(suggestion: dict) -> str:
@@ -90,13 +102,69 @@ async def send_telegram_message(text: str, chat_id: str | None = None) -> None:
     await bot.send_message(chat_id=target_chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
 
 
-def notify_suggestion(suggestion: dict) -> None:
-    """Format and send a single suggestion to Telegram — the synchronous
-    entry point used by plain-Python callers (Signal Skill console script,
-    later the OpenClaw scheduler).
+class _OneShotDiscordClient(discord.Client):
+    """Connects, sends exactly one message to one channel, and disconnects.
+
+    Discord's API is bot-client-based (unlike Telegram's stateless REST
+    Bot API) — even a single outbound message needs a client that logs in,
+    waits for `on_ready`, then sends. This throwaway client exists purely
+    so a single send can be awaited from plain synchronous callers instead
+    of running a persistent bot process.
     """
-    message = format_suggestion_message(suggestion)
-    asyncio.run(send_telegram_message(message))
+
+    def __init__(self, message: str, channel_id: int, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.message = message
+        self.channel_id = channel_id
+
+    async def on_ready(self) -> None:
+        channel = self.get_channel(self.channel_id) or await self.fetch_channel(self.channel_id)
+        await channel.send(self.message)
+        await self.close()
+
+
+async def send_discord_message(text: str, channel_id: str) -> None:
+    """Send `text` to a specific Discord channel via a one-shot bot client."""
+    settings = Settings.load()
+    if not settings.discord_bot_token:
+        raise ValueError("DISCORD_BOT_TOKEN must be set to send Discord notifications")
+    if not channel_id:
+        raise ValueError("A Discord channel ID must be configured to send this notification")
+
+    client = _OneShotDiscordClient(text, int(channel_id), intents=discord.Intents.default())
+    await client.start(settings.discord_bot_token)
+
+
+def route_message(message_type: str, text: str, telegram_chat_id: str | None = None) -> None:
+    """Send `text` to Telegram (the primary action channel, every message
+    type) and, if Discord is configured for `message_type`, also to the
+    matching Discord channel (the secondary organized reading surface).
+
+    The pipeline that produces a message calls this once; deciding where
+    it goes lives here, not in the caller (Section 3.4) — a Discord send
+    failure never blocks the Telegram send, since Telegram is primary.
+    """
+    asyncio.run(send_telegram_message(text, chat_id=telegram_chat_id))
+
+    settings = Settings.load()
+    channel_field = DISCORD_CHANNEL_FIELD_BY_TYPE.get(message_type)
+    channel_id = getattr(settings, channel_field, "") if channel_field else ""
+    if not (settings.discord_bot_token and channel_id):
+        return
+
+    try:
+        asyncio.run(send_discord_message(text, channel_id))
+    except Exception as exc:
+        print(f"  (not sent to Discord #{message_type}: {exc})")
+
+
+def notify_suggestion(suggestion: dict) -> None:
+    """Format and route a single suggestion — Telegram always, plus the
+    #signals Discord channel if configured. The synchronous entry point
+    used by plain-Python callers (Signal Skill console script, later the
+    OpenClaw scheduler).
+    """
+    route_message("signal", format_suggestion_message(suggestion))
 
 
 if __name__ == "__main__":
