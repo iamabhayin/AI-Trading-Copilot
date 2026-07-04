@@ -14,7 +14,7 @@ the Signal Skill, not here.
 # TODO: Phase 3+ — swap fetch_ohlcv's data source to the live broker API
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -87,7 +87,7 @@ def fetch_news(ticker: str, limit: int = 10) -> list[dict]:
         ]
 
     if settings.finnhub_api_key:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         resp = requests.get(
             "https://finnhub.io/api/v1/company-news",
             params={
