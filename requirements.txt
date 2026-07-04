@@ -8,3 +8,4 @@ python-telegram-bot==22.8
 discord.py==2.7.1
 pytest==9.1.1
 ruff==0.15.20
+pydantic==2.13.4
