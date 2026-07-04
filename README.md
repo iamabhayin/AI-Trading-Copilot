@@ -39,17 +39,17 @@ openclaw.config.yaml   scheduler + skill registration for OpenClaw
 
 Each phase is its own branch off `develop` (see repo's branching strategy), merged back via PR once tested.
 
-| Phase | What gets built | Notes |
-|---|---|---|
-| 0 | Validation phase — 5-stock watchlist, Ollama for filtering/extraction + Claude Haiku for signal synthesis, paper trading only | Cheap go/no-go gate before real spend or real trading |
-| 1 | Data fetch + indicator engine (plain Python, console output) | No OpenClaw yet — validate data pipeline first |
-| 2 | Signal skill with Claude API call | Still console-only, sanity-check suggestions |
-| 3 | Install OpenClaw on VPS, wire Telegram notify skill | First real message delivery |
-| 4 | Position tracker (reply parsing → SQLite) | "Bought X" flow working end-to-end |
-| 5 | Monitor skill (code tripwire + agent risk judgment) | Light daily/twice-daily check, not tight polling |
-| 6 | Chat skill (conversational Q&A) | Free-form follow-up questions |
-| 7 | Cleanup skill (manual command) | Final piece |
-| 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted |
+| Phase | What gets built | Notes | Status |
+|---|---|---|---|
+| 0 | Validation phase — 5-stock watchlist, Ollama for filtering/extraction + Claude Haiku for signal synthesis, paper trading only | Cheap go/no-go gate before real spend or real trading | Skipped |
+| 1 | Data fetch + indicator engine (plain Python, console output) | No OpenClaw yet — validate data pipeline first | ✅ Done — merged into `develop` via PR #1 |
+| 2 | Signal skill with Claude API call | Still console-only, sanity-check suggestions | In progress — `develop` synced into `phase-2-signal-agent` via PR #2 |
+| 3 | Install OpenClaw on VPS, wire Telegram notify skill | First real message delivery | Not started |
+| 4 | Position tracker (reply parsing → SQLite) | "Bought X" flow working end-to-end | Not started |
+| 5 | Monitor skill (code tripwire + agent risk judgment) | Light daily/twice-daily check, not tight polling | Not started |
+| 6 | Chat skill (conversational Q&A) | Free-form follow-up questions | Not started |
+| 7 | Cleanup skill (manual command) | Final piece | Not started |
+| 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | Not started |
 
 ## Notes
 
