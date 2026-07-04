@@ -25,7 +25,7 @@ skills:
     enabled: true
   - name: signal_skill
     enabled: true
-  # Telegram wired in Phase 3; TODO: Phase 8 adds Discord routing
+  # Telegram wired in Phase 3, Discord dual-channel routing added in Phase 8
   - name: notify_skill
     enabled: true
   - name: position_tracker_skill
@@ -43,5 +43,5 @@ channels:
   telegram:
     enabled: true  # requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
   discord:
-    enabled: false  # TODO: Phase 8
-    # channel_map fills in once Discord IDs are known (see .env.example)
+    enabled: true  # requires DISCORD_BOT_TOKEN + per-channel IDs in .env; routing skips
+                    # silently per message type if its channel ID isn't set (see .env.example)

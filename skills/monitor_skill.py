@@ -173,10 +173,8 @@ def monitor_all_positions() -> list[dict]:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     from config.startup import StartupService
-    from skills.notify_skill import send_telegram_message
+    from skills.notify_skill import route_message
 
     StartupService().start()
 
@@ -187,6 +185,6 @@ if __name__ == "__main__":
     for alert in alerts:
         print(f"[{alert['alert_type']}] {alert['message']}")
         try:
-            asyncio.run(send_telegram_message(alert["message"]))
+            route_message("monitoring", alert["message"])
         except ValueError as exc:
             print(f"  (not sent to Telegram: {exc})")
