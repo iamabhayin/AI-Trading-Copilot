@@ -162,7 +162,9 @@ def fetch_ticker_snapshot(ticker: str, timeframe: str = "1d") -> dict:
 
 
 if __name__ == "__main__":
-    settings = Settings.load()
+    from config.startup import StartupService
+
+    settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
     default_timeframe = settings.default_timeframe or "1d"
 

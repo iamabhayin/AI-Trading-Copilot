@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import requests
 
 from config.settings import Settings
-from db.database import execute, fetch_one, init_db
+from db.database import execute, fetch_one
 
 BUY_WORDS = {"bought", "buy", "long"}
 SELL_WORDS = {"sold", "sell", "closed", "close"}
@@ -162,7 +162,9 @@ def handle_reply(message: str) -> dict:
 
 
 if __name__ == "__main__":
-    init_db()
+    from config.startup import StartupService
+
+    StartupService().start()
 
     demo_replies = [
         "bought 10 RELIANCE @ 2950",

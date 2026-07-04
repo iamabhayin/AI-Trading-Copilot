@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import anthropic
 
 from config.settings import Settings
-from db.database import execute, init_db
+from db.database import execute
 
 MODEL = "claude-opus-4-8"
 
@@ -116,12 +116,11 @@ def shortlist(suggestions: list[dict], limit: int = 5) -> list[dict]:
 
 
 if __name__ == "__main__":
+    from config.startup import StartupService
     from skills.data_fetch_skill import fetch_ticker_snapshot
     from skills.indicator_engine import compute_indicators, summarize_latest
 
-    init_db()
-
-    settings = Settings.load()
+    settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
     timeframe = settings.default_timeframe or "1d"
 
