@@ -1,0 +1,26 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["config", "db", "skills", "tests"]
+exclude = [".venv", "logs"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade (modern Python idioms)
+    "B",   # flake8-bugbear (common bug patterns)
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # line length is handled by the formatter/line-length setting, not worth failing builds over
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "db", "skills"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
