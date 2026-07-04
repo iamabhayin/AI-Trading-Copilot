@@ -34,9 +34,9 @@ skills:
     enabled: true
   - name: chat_skill
     enabled: true
-  # TODO: Phase 7 — manual trigger only, not scheduled
+  # Manual trigger only, not scheduled
   - name: cleanup_skill
-    enabled: false
+    enabled: true
     manual_only: true
 
 channels:

@@ -33,6 +33,7 @@ def get_connection(db_path: str | None = None):
     path = db_path or settings.sqlite_db_path
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")  # per-connection setting — schema.sql's PRAGMA only covers init_db()'s own connection
     try:
         yield conn
     finally:
