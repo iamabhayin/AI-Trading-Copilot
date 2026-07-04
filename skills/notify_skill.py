@@ -100,6 +100,10 @@ def notify_suggestion(suggestion: dict) -> None:
 
 
 if __name__ == "__main__":
+    from config.startup import StartupService
+
+    StartupService().start()
+
     row = fetch_one("SELECT * FROM suggestions ORDER BY created_at DESC LIMIT 1")
     if row:
         suggestion = dict(row)
