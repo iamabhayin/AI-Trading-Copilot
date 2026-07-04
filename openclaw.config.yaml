@@ -32,9 +32,8 @@ skills:
     enabled: true
   - name: monitor_skill
     enabled: true
-  # TODO: Phase 6
   - name: chat_skill
-    enabled: false
+    enabled: true
   # TODO: Phase 7 — manual trigger only, not scheduled
   - name: cleanup_skill
     enabled: false
