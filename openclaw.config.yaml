@@ -4,50 +4,44 @@
 scheduler:
   # Pre-market run: data fetch + indicator engine + signal skill -> notify skill
   pre_market_run:
-    enabled: false  # TODO: Phase 3 — enable once Telegram notify skill is wired
+    enabled: false  # TODO: enable once running on the OpenClaw VPS
     # cron: ""      # TODO: set once broker/market-hours timezone is finalized
 
   # Post-market run: same pipeline, end-of-day read
   post_market_run:
-    enabled: false  # TODO: Phase 3
+    enabled: false  # TODO: enable once running on the OpenClaw VPS
     # cron: ""      # TODO: set once broker/market-hours timezone is finalized
 
   # Light daily/twice-daily monitor check (Claude risk judgment on open positions,
   # not tight intraday polling — hard SL/target handled by broker GTT/OCO)
   monitor_check:
-    enabled: false  # TODO: Phase 5 — enable once monitor_skill is implemented
+    enabled: false  # TODO: enable once running on the OpenClaw VPS
     # cron: ""      # TODO: align with pre-market/post-market run times
 
 skills:
-  # TODO: Phase 1
   - name: data_fetch_skill
-    enabled: false
-  # TODO: Phase 1
+    enabled: true
   - name: indicator_engine
-    enabled: false
-  # TODO: Phase 2
+    enabled: true
   - name: signal_skill
-    enabled: false
-  # TODO: Phase 3 (Telegram), Phase 8 (Discord)
+    enabled: true
+  # Telegram wired in Phase 3, Discord dual-channel routing added in Phase 8
   - name: notify_skill
-    enabled: false
-  # TODO: Phase 4
+    enabled: true
   - name: position_tracker_skill
-    enabled: false
-  # TODO: Phase 5
+    enabled: true
   - name: monitor_skill
-    enabled: false
-  # TODO: Phase 6
+    enabled: true
   - name: chat_skill
-    enabled: false
-  # TODO: Phase 7 — manual trigger only, not scheduled
+    enabled: true
+  # Manual trigger only, not scheduled
   - name: cleanup_skill
-    enabled: false
+    enabled: true
     manual_only: true
 
 channels:
   telegram:
-    enabled: false  # TODO: Phase 3
+    enabled: true  # requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
   discord:
-    enabled: false  # TODO: Phase 8
-    # channel_map fills in once Discord IDs are known (see .env.example)
+    enabled: true  # requires DISCORD_BOT_TOKEN + per-channel IDs in .env; routing skips
+                    # silently per message type if its channel ID isn't set (see .env.example)
