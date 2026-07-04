@@ -15,7 +15,7 @@ scheduler:
   # Light daily/twice-daily monitor check (Claude risk judgment on open positions,
   # not tight intraday polling — hard SL/target handled by broker GTT/OCO)
   monitor_check:
-    enabled: false  # TODO: Phase 5 — enable once monitor_skill is implemented
+    enabled: false  # TODO: enable once running on the OpenClaw VPS
     # cron: ""      # TODO: align with pre-market/post-market run times
 
 skills:
@@ -28,12 +28,10 @@ skills:
   # Telegram wired in Phase 3; TODO: Phase 8 adds Discord routing
   - name: notify_skill
     enabled: true
-  # TODO: Phase 4
   - name: position_tracker_skill
-    enabled: false
-  # TODO: Phase 5
+    enabled: true
   - name: monitor_skill
-    enabled: false
+    enabled: true
   # TODO: Phase 6
   - name: chat_skill
     enabled: false
