@@ -1,6 +1,5 @@
 """Tests for skills/monitor_skill.py."""
 
-import pytest
 
 
 def test_placeholder():

@@ -1,6 +1,5 @@
 """Tests for skills/cleanup_skill.py."""
 
-import pytest
 
 
 def test_placeholder():
