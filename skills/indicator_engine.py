@@ -2,13 +2,14 @@
 
 Agent/Model: Code (pandas-ta). Deterministic, auditable — no LLM involved.
 
-Computes RSI, MACD, EMA crossovers, Bollinger Bands, ADX, volume anomalies,
-and support/resistance from OHLCV candles. Chart timeframe is configurable
-(e.g. `1h`, `4h`, `1d`, `1wk`) and passed in as a parameter — same skill
-code, different interval, no separate skill needed. Default recommendation
-is `1d` for swing-trade analysis, with `1h` as an opt-in secondary view.
-Outputs structured indicator values per ticker, tagged with the timeframe
-used.
+Computes exactly three indicators from OHLCV candles: RSI, a 14-day/50-day
+EMA pair, and Bollinger Bands. Chart timeframe is configurable (e.g. `1h`,
+`1d`) and passed in as a parameter — same skill code, different interval, no
+separate skill needed. Default is `1h`, since this is a swing/positional
+system trading off hourly candles. "14-day"/"50-day" mean calendar trading
+days, not candle counts — `TRADING_HOURS_PER_DAY` converts between the two
+for the EMA pair. Outputs structured indicator values per ticker, tagged
+with the timeframe used.
 """
 
 # TODO: Phase 1 — data fetch + indicator engine (plain Python, console output)
@@ -18,18 +19,31 @@ import pandas_ta as ta
 
 REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
-VOLUME_ANOMALY_MULTIPLIER = 2.0
-EMA_FAST = 20
-EMA_SLOW = 50
-SUPPORT_RESISTANCE_WINDOW = 20
+# NSE trading hours per day — basis for converting a calendar-day EMA
+# lookback (e.g. "14-day") into an hourly-candle period count (e.g. ~88).
+TRADING_HOURS_PER_DAY = 6.25
+
+# Candles per trading day, by timeframe.
+CANDLES_PER_TRADING_DAY = {"1h": TRADING_HOURS_PER_DAY, "1d": 1}
+
+EMA_FAST_DAYS = 14
+EMA_SLOW_DAYS = 50
 
 
-def compute_indicators(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
-    """Append RSI, MACD, EMA crossover, Bollinger Bands, ADX, volume anomaly,
-    and rolling support/resistance columns to an OHLCV DataFrame.
+def _period_for_days(days: int, timeframe: str) -> int:
+    """Convert a calendar-day lookback into a candle-count period for `timeframe`."""
+    candles_per_day = CANDLES_PER_TRADING_DAY.get(timeframe, 1)
+    return round(days * candles_per_day)
+
+
+def compute_indicators(df: pd.DataFrame, timeframe: str = "1h") -> pd.DataFrame:
+    """Append RSI, EMA(14-day)/EMA(50-day), and Bollinger Bands columns to
+    an OHLCV DataFrame.
 
     `df` must have (case-insensitive) open/high/low/close/volume columns.
-    The returned DataFrame is tagged with `timeframe` via `.attrs`.
+    The EMA periods are calendar-day based and converted to a candle count
+    for `timeframe` (e.g. ~88/~312 candles on `1h`). The returned DataFrame
+    is tagged with `timeframe` via `.attrs`.
     """
     missing = REQUIRED_COLUMNS - {c.lower() for c in df.columns}
     if missing:
@@ -40,24 +54,11 @@ def compute_indicators(df: pd.DataFrame, timeframe: str = "1d") -> pd.DataFrame:
 
     out["rsi_14"] = ta.rsi(out["close"], length=14)
 
-    macd = ta.macd(out["close"])
-    out = out.join(macd)
-
-    out["ema_20"] = ta.ema(out["close"], length=EMA_FAST)
-    out["ema_50"] = ta.ema(out["close"], length=EMA_SLOW)
-    out["ema_crossover_bullish"] = out["ema_20"] > out["ema_50"]
+    out["ema_14d"] = ta.ema(out["close"], length=_period_for_days(EMA_FAST_DAYS, timeframe))
+    out["ema_50d"] = ta.ema(out["close"], length=_period_for_days(EMA_SLOW_DAYS, timeframe))
 
     bbands = ta.bbands(out["close"], length=20)
     out = out.join(bbands)
-
-    adx = ta.adx(out["high"], out["low"], out["close"], length=14)
-    out["adx_14"] = adx["ADX_14"]
-
-    out["volume_sma_20"] = out["volume"].rolling(20).mean()
-    out["volume_anomaly"] = out["volume"] > (VOLUME_ANOMALY_MULTIPLIER * out["volume_sma_20"])
-
-    out["support"] = out["low"].rolling(SUPPORT_RESISTANCE_WINDOW).min()
-    out["resistance"] = out["high"].rolling(SUPPORT_RESISTANCE_WINDOW).max()
 
     out.attrs["timeframe"] = timeframe
     return out
@@ -72,17 +73,10 @@ def summarize_latest(df: pd.DataFrame) -> dict:
         "timeframe": df.attrs.get("timeframe"),
         "close": float(latest["close"]),
         "rsi_14": _safe_float(latest.get("rsi_14")),
-        "macd": _safe_float(latest.get("MACD_12_26_9")),
-        "macd_signal": _safe_float(latest.get("MACDs_12_26_9")),
-        "ema_20": _safe_float(latest.get("ema_20")),
-        "ema_50": _safe_float(latest.get("ema_50")),
-        "ema_crossover_bullish": bool(latest.get("ema_crossover_bullish")),
+        "ema_14d": _safe_float(latest.get("ema_14d")),
+        "ema_50d": _safe_float(latest.get("ema_50d")),
         "bb_upper": _safe_float(latest.get("BBU_20_2.0_2.0")),
         "bb_lower": _safe_float(latest.get("BBL_20_2.0_2.0")),
-        "adx_14": _safe_float(latest.get("adx_14")),
-        "volume_anomaly": bool(latest.get("volume_anomaly")),
-        "support": _safe_float(latest.get("support")),
-        "resistance": _safe_float(latest.get("resistance")),
     }
 
 
@@ -100,7 +94,7 @@ if __name__ == "__main__":
 
     settings = StartupService().start()
     tickers = settings.watchlist or ["AAPL"]
-    timeframe = settings.default_timeframe or "1d"
+    timeframe = settings.default_timeframe or "1h"
 
     for ticker in tickers:
         print(f"--- {ticker} ({timeframe}) ---")

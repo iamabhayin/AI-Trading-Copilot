@@ -1,19 +1,34 @@
 """Tests for skills/indicator_engine.py."""
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 import pytest
 
-from skills.indicator_engine import compute_indicators, summarize_latest
+from skills.indicator_engine import _period_for_days, compute_indicators, summarize_latest
+
+# Captured before any test patches skills.indicator_engine.ta (the same
+# pandas_ta module object) so side_effect can delegate to the real
+# implementation instead of recursing into the mock.
+_REAL_EMA = ta.ema
+_REAL_RSI = ta.rsi
+_REAL_BBANDS = ta.bbands
 
 EXPECTED_COLUMNS = [
     "rsi_14",
+    "ema_14d",
+    "ema_50d",
+    "BBU_20_2.0_2.0",
+    "BBL_20_2.0_2.0",
+]
+
+REMOVED_COLUMNS = [
     "MACD_12_26_9",
     "ema_20",
     "ema_50",
     "ema_crossover_bullish",
-    "BBU_20_2.0_2.0",
-    "BBL_20_2.0_2.0",
     "adx_14",
     "volume_anomaly",
     "support",
@@ -37,10 +52,34 @@ def sample_ohlcv() -> pd.DataFrame:
     )
 
 
+@pytest.mark.parametrize(
+    "days,timeframe,expected",
+    [
+        (14, "1h", 88),  # 14 * 6.25 = 87.5 -> 88
+        (50, "1h", 312),  # 50 * 6.25 = 312.5 -> 312
+        (14, "1d", 14),
+        (50, "1d", 50),
+    ],
+)
+def test_period_for_days_converts_calendar_days_to_candles(days, timeframe, expected):
+    assert _period_for_days(days, timeframe) == expected
+
+
+def test_compute_indicators_defaults_to_1h_timeframe(sample_ohlcv):
+    out = compute_indicators(sample_ohlcv)
+    assert out.attrs["timeframe"] == "1h"
+
+
 def test_compute_indicators_adds_expected_columns(sample_ohlcv):
     out = compute_indicators(sample_ohlcv, timeframe="1d")
     for column in EXPECTED_COLUMNS:
         assert column in out.columns
+
+
+def test_compute_indicators_excludes_removed_indicators(sample_ohlcv):
+    out = compute_indicators(sample_ohlcv, timeframe="1d")
+    for column in REMOVED_COLUMNS:
+        assert column not in out.columns
 
 
 def test_compute_indicators_is_case_insensitive(sample_ohlcv):
@@ -56,16 +95,6 @@ def test_rsi_is_bounded(sample_ohlcv):
     assert (rsi >= 0).all() and (rsi <= 100).all()
 
 
-def test_volume_anomaly_is_boolean(sample_ohlcv):
-    out = compute_indicators(sample_ohlcv)
-    assert out["volume_anomaly"].dtype == bool
-
-
-def test_support_never_exceeds_resistance(sample_ohlcv):
-    out = compute_indicators(sample_ohlcv).dropna(subset=["support", "resistance"])
-    assert (out["support"] <= out["resistance"]).all()
-
-
 def test_missing_columns_raises():
     with pytest.raises(ValueError):
         compute_indicators(pd.DataFrame({"close": [1, 2, 3]}))
@@ -76,10 +105,48 @@ def test_timeframe_is_tagged_on_output(sample_ohlcv):
     assert out.attrs["timeframe"] == "1wk"
 
 
+@patch("skills.indicator_engine.ta.ema")
+def test_ema_periods_convert_to_hourly_candles_on_1h_timeframe(mock_ema, sample_ohlcv):
+    mock_ema.side_effect = _REAL_EMA
+
+    compute_indicators(sample_ohlcv, timeframe="1h")
+
+    lengths = [call.kwargs["length"] for call in mock_ema.call_args_list]
+    assert lengths == [88, 312]
+
+
+@patch("skills.indicator_engine.ta.ema")
+def test_ema_periods_use_raw_day_count_on_1d_timeframe(mock_ema, sample_ohlcv):
+    mock_ema.side_effect = _REAL_EMA
+
+    compute_indicators(sample_ohlcv, timeframe="1d")
+
+    lengths = [call.kwargs["length"] for call in mock_ema.call_args_list]
+    assert lengths == [14, 50]
+
+
+@patch("skills.indicator_engine.ta.rsi")
+def test_rsi_period_is_not_converted_for_timeframe(mock_rsi, sample_ohlcv):
+    mock_rsi.side_effect = _REAL_RSI
+
+    compute_indicators(sample_ohlcv, timeframe="1h")
+
+    assert mock_rsi.call_args.kwargs["length"] == 14
+
+
+@patch("skills.indicator_engine.ta.bbands")
+def test_bollinger_period_is_not_converted_for_timeframe(mock_bbands, sample_ohlcv):
+    mock_bbands.side_effect = _REAL_BBANDS
+
+    compute_indicators(sample_ohlcv, timeframe="1h")
+
+    assert mock_bbands.call_args.kwargs["length"] == 20
+
+
 def test_summarize_latest_returns_flat_dict(sample_ohlcv):
     out = compute_indicators(sample_ohlcv, timeframe="1d")
     summary = summarize_latest(out)
+
     assert summary["timeframe"] == "1d"
     assert isinstance(summary["close"], float)
-    assert isinstance(summary["ema_crossover_bullish"], bool)
-    assert isinstance(summary["volume_anomaly"], bool)
+    assert set(summary) == {"timeframe", "close", "rsi_14", "ema_14d", "ema_50d", "bb_upper", "bb_lower"}

@@ -32,10 +32,11 @@ SYSTEM_PROMPT = (
     "You are a swing-trading signal analyst. Given technical indicators and "
     "recent relevant news headlines for a stock, decide whether to suggest "
     "BUY, SELL, or HOLD. For BUY/SELL, give a concrete entry price, "
-    "stop-loss, and target based on the supplied indicators (e.g. support/"
-    "resistance, Bollinger Bands). For HOLD, entry/stop_loss/target may be "
-    "null. Give a confidence score between 0 and 1, and a short rationale "
-    "grounded in the specific indicator values and headlines you were given."
+    "stop-loss, and target based on the supplied indicators (RSI, the "
+    "14-day/50-day EMA pair, and Bollinger Bands). For HOLD, entry/"
+    "stop_loss/target may be null. Give a confidence score between 0 and 1, "
+    "and a short rationale grounded in the specific indicator values and "
+    "headlines you were given."
 )
 
 SUGGESTION_SCHEMA = {
@@ -122,7 +123,7 @@ if __name__ == "__main__":
 
     settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
-    timeframe = settings.default_timeframe or "1d"
+    timeframe = settings.default_timeframe or "1h"
 
     suggestions = []
     for ticker in watchlist:
