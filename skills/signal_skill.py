@@ -116,10 +116,15 @@ def shortlist(suggestions: list[dict], limit: int = 5) -> list[dict]:
     return sorted(actionable, key=lambda s: s.get("confidence") or 0, reverse=True)[:limit]
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI/cron entry point: the full pipeline for the whole watchlist —
+    data fetch -> indicators -> signal generation -> save -> notify the
+    shortlisted (non-HOLD) suggestions. This is what the scheduler invokes.
+    """
     from config.startup import StartupService
     from skills.data_fetch_skill import fetch_ticker_snapshot
     from skills.indicator_engine import compute_indicators, summarize_latest
+    from skills.notify_skill import notify_suggestion
 
     settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
@@ -138,3 +143,8 @@ if __name__ == "__main__":
     print("\n--- Shortlist ---")
     for suggestion in shortlist(suggestions):
         print(f"{suggestion['ticker']}: {suggestion['action']} (confidence={suggestion['confidence']})")
+        notify_suggestion(suggestion)
+
+
+if __name__ == "__main__":
+    main()
