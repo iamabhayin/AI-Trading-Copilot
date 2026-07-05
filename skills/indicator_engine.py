@@ -96,9 +96,9 @@ if __name__ == "__main__":
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    from config.settings import Settings
+    from config.startup import StartupService
 
-    settings = Settings.load()
+    settings = StartupService().start()
     tickers = settings.watchlist or ["AAPL"]
     timeframe = settings.default_timeframe or "1d"
 
