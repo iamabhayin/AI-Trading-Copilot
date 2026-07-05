@@ -79,7 +79,7 @@ def format_suggestion_message(suggestion: dict) -> str:
         resp = requests.post(
             f"{settings.ollama_host}/api/generate",
             json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-            timeout=15,
+            timeout=30,
         )
         resp.raise_for_status()
         polished = resp.json().get("response", "").strip()

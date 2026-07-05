@@ -138,7 +138,7 @@ def filter_news_relevance(ticker: str, headlines: list[dict]) -> list[dict]:
             resp = requests.post(
                 f"{settings.ollama_host}/api/generate",
                 json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-                timeout=15,
+                timeout=30,
             )
             resp.raise_for_status()
             answer = resp.json().get("response", "").strip().lower()

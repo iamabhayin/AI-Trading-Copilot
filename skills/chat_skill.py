@@ -13,6 +13,7 @@ user-facing trust, not a place to downgrade for cost.
 
 # TODO: Phase 6 — chat skill (conversational Q&A), free-form follow-up questions
 
+import argparse
 import json
 import re
 import sys
@@ -165,12 +166,29 @@ def answer_question(message: str) -> dict:
     return {"ticker": ticker, "answer": answer}
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point.
+
+    `python chat_skill.py "why this stop-loss?"` answers a real question
+    via answer_question(). Run with no arguments to fall back to a
+    hardcoded demo question, for manual testing without a real message.
+    """
+    parser = argparse.ArgumentParser(description="Answer a free-form question about a tracked stock.")
+    parser.add_argument("question", nargs="*", help='Question text, e.g. "why this stop-loss?"')
+    args = parser.parse_args(argv)
+
     from config.startup import StartupService
 
     StartupService().start()
 
-    demo_question = "What's the latest on AAPL?"
-    print(f"Q: {demo_question}")
-    result = answer_question(demo_question)
-    print(f"A ({result['ticker']}): {result['answer']}")
+    question = " ".join(args.question) if args.question else "What's the latest on AAPL?"
+    print(f"Q: {question}")
+    result = answer_question(question)
+    if result["ticker"] is None:
+        print(result["answer"])
+    else:
+        print(f"A ({result['ticker']}): {result['answer']}")
+
+
+if __name__ == "__main__":
+    main()
