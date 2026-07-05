@@ -50,7 +50,7 @@ Each phase is its own branch off `develop` (see repo's branching strategy), merg
 | 5 | Monitor skill (code tripwire + agent risk judgment) | Light daily/twice-daily check, not tight polling | ✅ Done — merged into `develop` (PR #10) |
 | 6 | Chat skill (conversational Q&A) | Free-form follow-up questions | ✅ Done — merged into `develop` (PR #12) |
 | 7 | Cleanup skill (manual command) | Final piece | ✅ Done — merged into `develop` (PR #14) |
-| 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | ✅ Skill code done on `phase-8-discord-dualchannel`, not yet merged. Live Discord credentials still pending manual setup — see below |
+| 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | ✅ Done — merged into `main` (PR #16) |
 
 ## Phase Status
 
@@ -69,7 +69,7 @@ Detail behind the Build order table above — what each completed skill does, wh
 
 ### Phase 3 — Telegram Notify Skill
 
-- **`skills/notify_skill.py`** — formats a suggestion into a Telegram message (deterministic template by default, with an optional Ollama phrasing pass that fails open to the template if Ollama isn't configured/reachable), then sends it via `python-telegram-bot`'s async `Bot.send_message` (wrapped in `asyncio.run` for a synchronous call site). Discord routing is Phase 8, not yet built.
+- **`skills/notify_skill.py`** — formats a suggestion into a Telegram message (deterministic template by default, with an optional Ollama phrasing pass that fails open to the template if Ollama isn't configured/reachable), then sends it via `python-telegram-bot`'s async `Bot.send_message` (wrapped in `asyncio.run` for a synchronous call site). Discord routing was added later, in Phase 8 (see below).
 - **Tested:** `tests/test_notify_skill.py` (10 tests — template formatting for BUY vs. HOLD, Ollama phrasing path and its fail-open behavior, missing-token/chat-id validation, the actual Telegram send call). Telegram and Ollama are both mocked — no real message has been sent from this environment (no bot token configured); see Pending manual setup below.
 
 ### Phase 4 — Position Tracker
