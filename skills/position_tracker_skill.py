@@ -14,6 +14,7 @@ problem in reverse, so it lives in this skill too — the schema's
 
 # TODO: Phase 4 — position tracker (reply parsing -> SQLite), "bought X" flow working end-to-end
 
+import argparse
 import json
 import re
 import sys
@@ -161,10 +162,44 @@ def handle_reply(message: str) -> dict:
     return {"status": "closed", "position_id": position_id, **trade}
 
 
-if __name__ == "__main__":
+def format_reply_result(result: dict) -> str:
+    """Render a handle_reply() result as a clean, human-readable
+    confirmation — callers relay this text back to the user (e.g.
+    OpenClaw replying in Discord), not the raw dict.
+    """
+    status = result["status"]
+    if status == "unparsed":
+        return f"Could not recognize a trade in: {result['message']!r}"
+    if status == "no_active_position":
+        return f"No active {result['ticker']} position found to close."
+
+    action_word = "Bought" if result["action"] == "buy" else "Sold"
+    verb = "Opened" if status == "opened" else "Closed"
+    return (
+        f"{verb} position #{result['position_id']}: {action_word} {result['qty']:g} "
+        f"{result['ticker']} @ {result['price']:g}"
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point.
+
+    `python position_tracker_skill.py "bought 10 RELIANCE @ 2950"` parses
+    and records a real trade reply via handle_reply(). Run with no
+    arguments to fall back to the hardcoded demo, for manual testing
+    without a real message.
+    """
+    parser = argparse.ArgumentParser(description="Parse a trade reply and record it in the positions table.")
+    parser.add_argument("message", nargs="*", help='Trade reply text, e.g. "bought 10 RELIANCE @ 2950"')
+    args = parser.parse_args(argv)
+
     from config.startup import StartupService
 
     StartupService().start()
+
+    if args.message:
+        print(format_reply_result(handle_reply(" ".join(args.message))))
+        return
 
     demo_replies = [
         "bought 10 RELIANCE @ 2950",
@@ -174,3 +209,7 @@ if __name__ == "__main__":
     for reply in demo_replies:
         result = handle_reply(reply)
         print(f"{reply!r}\n  -> {result}")
+
+
+if __name__ == "__main__":
+    main()

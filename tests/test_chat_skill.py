@@ -15,6 +15,7 @@ from skills.chat_skill import (
     known_tickers,
     last_discussed_ticker,
     latest_suggestion,
+    main,
     recent_history,
     record_turn,
 )
@@ -209,3 +210,40 @@ def test_answer_question_raises_on_refusal(
         mock_snapshot.return_value = {"ohlcv": MagicMock(), "news": []}
         with pytest.raises(RuntimeError):
             answer_question("what's up with AAPL?")
+
+
+@patch("skills.chat_skill.answer_question")
+@patch("config.startup.StartupService")
+def test_main_with_question_args_calls_answer_question(mock_startup_cls, mock_answer_question, capsys):
+    mock_startup_cls.return_value.start.return_value = None
+    mock_answer_question.return_value = {"ticker": "AAPL", "answer": "Looking strong today."}
+
+    main(["why", "this", "stop-loss?"])
+
+    mock_answer_question.assert_called_once_with("why this stop-loss?")
+    captured = capsys.readouterr().out
+    assert "Q: why this stop-loss?" in captured
+    assert "A (AAPL): Looking strong today." in captured
+
+
+@patch("skills.chat_skill.answer_question")
+@patch("config.startup.StartupService")
+def test_main_without_args_runs_demo_question(mock_startup_cls, mock_answer_question):
+    mock_startup_cls.return_value.start.return_value = None
+    mock_answer_question.return_value = {"ticker": "AAPL", "answer": "Demo answer."}
+
+    main([])
+
+    mock_answer_question.assert_called_once_with("What's the latest on AAPL?")
+
+
+@patch("skills.chat_skill.answer_question")
+@patch("config.startup.StartupService")
+def test_main_prints_answer_when_no_ticker_resolved(mock_startup_cls, mock_answer_question, capsys):
+    mock_startup_cls.return_value.start.return_value = None
+    mock_answer_question.return_value = {"ticker": None, "answer": "Not sure which stock you mean."}
+
+    main(["how's", "the", "market?"])
+
+    captured = capsys.readouterr().out
+    assert "Not sure which stock you mean." in captured
