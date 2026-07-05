@@ -22,10 +22,18 @@ This machine also runs the **AI Trading Copilot** project
 (`D:\Projects\AI-Trading-Copilot`). When an inbound message arrives on the Discord channels bound
 to this project, classify it before responding conversationally:
 
+**Working directory matters.** Both exec commands below read a relative-path SQLite DB
+(`db/trading_copilot.db`), so they only work correctly when run with working directory
+`D:\Projects\AI-Trading-Copilot` — set that explicitly on the exec call itself (not by `cd`-ing
+first). Running from any other directory fails with a "DB path" or "unable to open database file"
+error even though the exec itself succeeds. (Found live: the agent's first real attempt hit this,
+self-diagnosed by reading `db/database.py`, and retried correctly — but that's wasted tool calls
+that won't always self-resolve, hence spelling it out here.)
+
 **1. Trade confirmation** — the message reports a completed buy/sell (a quantity, a ticker, and
 usually a price), e.g. "bought 10 RELIANCE @ 2950" or "just bought some RELIANCE, 10 shares around
 2950":
-- Run via `exec`:
+- Run via `exec` (cwd=`D:\Projects\AI-Trading-Copilot`):
   `D:\Projects\AI-Trading-Copilot\.venv\Scripts\python.exe D:\Projects\AI-Trading-Copilot\skills\position_tracker_skill.py "<the exact message text>"`
 - Reply with exactly what the script printed to stdout — don't paraphrase or invent details it
   didn't report.
@@ -33,7 +41,7 @@ usually a price), e.g. "bought 10 RELIANCE @ 2950" or "just bought some RELIANCE
 **2. A question about a stock, a past suggestion, or a position** — anything asking why/what/how
 about a ticker, a stop-loss, a target, or "what's the latest on X", e.g. "why this stop-loss on
 AAPL?" or "what's going on with RELIANCE":
-- Run via `exec`:
+- Run via `exec` (cwd=`D:\Projects\AI-Trading-Copilot`):
   `D:\Projects\AI-Trading-Copilot\.venv\Scripts\python.exe D:\Projects\AI-Trading-Copilot\skills\chat_skill.py "<the exact message text>"`
 - Relay the script's answer back — it's already grounded in fresh data, don't add your own market
   commentary on top of it.
