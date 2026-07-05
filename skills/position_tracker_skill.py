@@ -80,7 +80,7 @@ def parse_trade_reply_with_ollama(message: str) -> dict | None:
         resp = requests.post(
             f"{settings.ollama_host}/api/generate",
             json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-            timeout=15,
+            timeout=30,
         )
         resp.raise_for_status()
         parsed = json.loads(resp.json().get("response", "").strip())
