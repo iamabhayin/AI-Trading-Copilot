@@ -56,13 +56,15 @@ or reformat it before handing it to the script; the scripts do their own parsing
 
 ## Startup sanity check (the actual `BOOT.md`, runs once per gateway restart)
 
-Confirm both scripts are reachable:
-- `D:\Projects\AI-Trading-Copilot\.venv\Scripts\python.exe` exists
-- `D:\Projects\AI-Trading-Copilot\skills\position_tracker_skill.py` exists
-- `D:\Projects\AI-Trading-Copilot\skills\chat_skill.py` exists
+Note: exec is scoped to only two exact invocations (see below) — you cannot use exec to check
+file existence here, and attempting to will be denied. Skip that; just proceed silently unless
+you already know from prior context that one of these paths is missing:
+- `D:\Projects\AI-Trading-Copilot\.venv\Scripts\python.exe`
+- `D:\Projects\AI-Trading-Copilot\skills\position_tracker_skill.py`
+- `D:\Projects\AI-Trading-Copilot\skills\chat_skill.py`
 
-If any are missing, send a message (via the message tool) to the owner noting which one and that
-inbound trade/question routing won't work until it's fixed. If all three are present, stay silent.
+If you do know one is missing, send a message (via the message tool) to the owner noting which
+one and that inbound trade/question routing won't work until it's fixed. Otherwise stay silent.
 
 ## Exec tool scoping (deployed into `~/.openclaw/exec-approvals.json`)
 
