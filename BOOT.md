@@ -63,3 +63,50 @@ Confirm both scripts are reachable:
 
 If any are missing, send a message (via the message tool) to the owner noting which one and that
 inbound trade/question routing won't work until it's fixed. If all three are present, stay silent.
+
+## Exec tool scoping (deployed into `~/.openclaw/exec-approvals.json`)
+
+The routing rules above only run these two scripts safely if the `exec` tool can't run anything
+else. Before enabling the routing rules live, the `main` agent's exec policy was locked down from
+the OpenClaw default (`security=full` — fully unrestricted) to an explicit allowlist:
+
+```json
+{
+  "version": 1,
+  "socket": {},
+  "defaults": {},
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "off",
+      "askFallback": "deny",
+      "allowlist": [
+        {
+          "id": "ai-trading-copilot-position-tracker",
+          "pattern": "D:\\Projects\\AI-Trading-Copilot\\.venv\\Scripts\\python.exe",
+          "argPattern": "position_tracker_skill\\.py",
+          "source": "manual"
+        },
+        {
+          "id": "ai-trading-copilot-chat-skill",
+          "pattern": "D:\\Projects\\AI-Trading-Copilot\\.venv\\Scripts\\python.exe",
+          "argPattern": "chat_skill\\.py",
+          "source": "manual"
+        }
+      ]
+    }
+  }
+}
+```
+
+Applied via `openclaw approvals set --file <path>`. Allowlist entries match the resolved binary
+path (the venv's `python.exe`, not a bare `python` — bare names only match commands resolved via
+`PATH`) intersected with an `argPattern` regex that must match the invocation's arguments. This
+means: the `main` agent's exec tool can run the venv's `python.exe` only when its arguments mention
+`position_tracker_skill.py` or `chat_skill.py` — nothing else, and no other binary at all
+(`security=allowlist` denies everything not explicitly listed; `askFallback=deny` means an
+unmatched command is silently denied rather than prompting, since there's no interactive approver
+during a live Discord conversation).
+
+Verify anytime with `openclaw exec-policy show` (should read `security=allowlist, ask=off`) or
+`openclaw approvals get --json`.
