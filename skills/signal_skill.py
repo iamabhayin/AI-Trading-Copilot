@@ -32,10 +32,11 @@ SYSTEM_PROMPT = (
     "You are a swing-trading signal analyst. Given technical indicators and "
     "recent relevant news headlines for a stock, decide whether to suggest "
     "BUY, SELL, or HOLD. For BUY/SELL, give a concrete entry price, "
-    "stop-loss, and target based on the supplied indicators (e.g. support/"
-    "resistance, Bollinger Bands). For HOLD, entry/stop_loss/target may be "
-    "null. Give a confidence score between 0 and 1, and a short rationale "
-    "grounded in the specific indicator values and headlines you were given."
+    "stop-loss, and target based on the supplied indicators (RSI, the "
+    "14-day/50-day EMA pair, and Bollinger Bands). For HOLD, entry/"
+    "stop_loss/target may be null. Give a confidence score between 0 and 1, "
+    "and a short rationale grounded in the specific indicator values and "
+    "headlines you were given."
 )
 
 SUGGESTION_SCHEMA = {
@@ -115,21 +116,30 @@ def shortlist(suggestions: list[dict], limit: int = 5) -> list[dict]:
     return sorted(actionable, key=lambda s: s.get("confidence") or 0, reverse=True)[:limit]
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI/cron entry point: the full pipeline for the whole watchlist —
+    data fetch -> indicators -> signal generation -> save -> notify the
+    shortlisted (non-HOLD) suggestions. This is what the scheduler invokes.
+    """
     from config.startup import StartupService
     from skills.data_fetch_skill import fetch_ticker_snapshot
     from skills.indicator_engine import compute_indicators, summarize_latest
+    from skills.notify_skill import notify_suggestion
 
     settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
-    timeframe = settings.default_timeframe or "1d"
+    timeframe = settings.default_timeframe or "1h"
 
     suggestions = []
     for ticker in watchlist:
         print(f"--- {ticker} ---")
-        snapshot = fetch_ticker_snapshot(ticker, timeframe)
-        indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
-        suggestion = generate_suggestion(ticker, indicators, snapshot["news"])
+        try:
+            snapshot = fetch_ticker_snapshot(ticker, timeframe)
+            indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
+            suggestion = generate_suggestion(ticker, indicators, snapshot["news"])
+        except Exception as exc:  # one bad/delisted ticker must not block the rest of the watchlist
+            print(f"  skipping {ticker}: {exc}")
+            continue
         print(json.dumps(suggestion, indent=2))
         save_suggestion(suggestion, timeframe)
         suggestions.append(suggestion)
@@ -137,3 +147,8 @@ if __name__ == "__main__":
     print("\n--- Shortlist ---")
     for suggestion in shortlist(suggestions):
         print(f"{suggestion['ticker']}: {suggestion['action']} (confidence={suggestion['confidence']})")
+        notify_suggestion(suggestion)
+
+
+if __name__ == "__main__":
+    main()

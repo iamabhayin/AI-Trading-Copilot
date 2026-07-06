@@ -37,7 +37,7 @@ TIMEFRAME_TO_YF_INTERVAL = {
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
-def fetch_ohlcv(ticker: str, timeframe: str = "1d", period: str = "6mo") -> pd.DataFrame:
+def fetch_ohlcv(ticker: str, timeframe: str = "1h", period: str = "6mo") -> pd.DataFrame:
     """Pull OHLCV candles for `ticker` at the given timeframe.
 
     Uses yfinance for local/testing (Phase 0-1, free, no key required).
@@ -149,7 +149,7 @@ def filter_news_relevance(ticker: str, headlines: list[dict]) -> list[dict]:
     return filtered
 
 
-def fetch_ticker_snapshot(ticker: str, timeframe: str = "1d") -> dict:
+def fetch_ticker_snapshot(ticker: str, timeframe: str = "1h") -> dict:
     """Bundle OHLCV + relevance-filtered news into the structured payload
     consumed by the Indicator Engine and Signal Skill.
     """
@@ -166,7 +166,7 @@ if __name__ == "__main__":
 
     settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
-    default_timeframe = settings.default_timeframe or "1d"
+    default_timeframe = settings.default_timeframe or "1h"
 
     for symbol in watchlist:
         print(f"--- {symbol} ({default_timeframe}) ---")

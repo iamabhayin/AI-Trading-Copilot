@@ -140,7 +140,7 @@ def answer_question(message: str) -> dict:
     if ticker is None:
         return {"ticker": None, "answer": "I'm not sure which stock you mean — mention a ticker to get started."}
 
-    timeframe = settings.default_timeframe or "1d"
+    timeframe = settings.default_timeframe or "1h"
 
     snapshot = fetch_ticker_snapshot(ticker, timeframe)
     indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
