@@ -10,7 +10,9 @@ import pytest
 
 from skills.position_tracker_skill import (
     close_position,
+    format_reply_result,
     handle_reply,
+    main,
     open_position,
     parse_trade,
     parse_trade_reply,
@@ -171,3 +173,53 @@ def test_handle_reply_reports_no_active_position(mock_close_position):
     result = handle_reply("sold 10 RELIANCE @ 3050")
 
     assert result["status"] == "no_active_position"
+
+
+def test_format_reply_result_for_opened_position():
+    result = {"status": "opened", "position_id": 3, "action": "buy", "ticker": "RELIANCE", "qty": 10.0, "price": 2950.0}
+    assert format_reply_result(result) == "Opened position #3: Bought 10 RELIANCE @ 2950"
+
+
+def test_format_reply_result_for_closed_position():
+    result = {"status": "closed", "position_id": 3, "action": "sell", "ticker": "RELIANCE", "qty": 10.0, "price": 3050.0}
+    assert format_reply_result(result) == "Closed position #3: Sold 10 RELIANCE @ 3050"
+
+
+def test_format_reply_result_for_no_active_position():
+    result = {"status": "no_active_position", "action": "sell", "ticker": "RELIANCE", "qty": 10.0, "price": 3050.0}
+    assert format_reply_result(result) == "No active RELIANCE position found to close."
+
+
+def test_format_reply_result_for_unparsed():
+    result = {"status": "unparsed", "message": "how is the market today"}
+    assert format_reply_result(result) == "Could not recognize a trade in: 'how is the market today'"
+
+
+@patch("skills.position_tracker_skill.handle_reply")
+@patch("config.startup.StartupService")
+def test_main_with_message_args_calls_handle_reply(mock_startup_cls, mock_handle_reply, capsys):
+    mock_startup_cls.return_value.start.return_value = None
+    mock_handle_reply.return_value = {
+        "status": "opened",
+        "position_id": 1,
+        "action": "buy",
+        "ticker": "AAPL",
+        "qty": 10.0,
+        "price": 190.0,
+    }
+
+    main(["bought", "10", "AAPL", "@", "190"])
+
+    mock_handle_reply.assert_called_once_with("bought 10 AAPL @ 190")
+    assert "Opened position #1: Bought 10 AAPL @ 190" in capsys.readouterr().out
+
+
+@patch("skills.position_tracker_skill.handle_reply")
+@patch("config.startup.StartupService")
+def test_main_without_args_runs_demo(mock_startup_cls, mock_handle_reply):
+    mock_startup_cls.return_value.start.return_value = None
+    mock_handle_reply.return_value = {"status": "unparsed", "message": "x"}
+
+    main([])
+
+    assert mock_handle_reply.call_count == 3

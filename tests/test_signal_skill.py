@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skills.signal_skill import generate_suggestion, save_suggestion, shortlist
+from skills.signal_skill import generate_suggestion, main, save_suggestion, shortlist
 
 
 def _mock_response(payload: dict, stop_reason: str = "end_turn"):
@@ -97,3 +97,61 @@ def test_shortlist_respects_limit():
 
     assert len(result) == 3
     assert result[0]["ticker"] == "9"
+
+
+@patch("skills.notify_skill.notify_suggestion")
+@patch("skills.signal_skill.save_suggestion")
+@patch("skills.signal_skill.generate_suggestion")
+@patch("skills.indicator_engine.summarize_latest")
+@patch("skills.indicator_engine.compute_indicators")
+@patch("skills.data_fetch_skill.fetch_ticker_snapshot")
+@patch("config.startup.StartupService")
+def test_main_notifies_only_shortlisted_suggestions(
+    mock_startup_cls,
+    mock_fetch_snapshot,
+    mock_compute_indicators,
+    mock_summarize_latest,
+    mock_generate_suggestion,
+    mock_save_suggestion,
+    mock_notify_suggestion,
+):
+    mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["AAPL", "MSFT"], default_timeframe="1h")
+    mock_fetch_snapshot.return_value = {"ohlcv": MagicMock(), "news": []}
+    mock_summarize_latest.return_value = {"rsi_14": 50.0}
+    buy_suggestion = {"ticker": "AAPL", "action": "BUY", "confidence": 0.8}
+    hold_suggestion = {"ticker": "MSFT", "action": "HOLD", "confidence": 0.5}
+    mock_generate_suggestion.side_effect = [buy_suggestion, hold_suggestion]
+
+    main()
+
+    assert mock_save_suggestion.call_count == 2
+    mock_notify_suggestion.assert_called_once_with(buy_suggestion)
+
+
+@patch("skills.notify_skill.notify_suggestion")
+@patch("skills.signal_skill.save_suggestion")
+@patch("skills.signal_skill.generate_suggestion")
+@patch("skills.indicator_engine.summarize_latest")
+@patch("skills.indicator_engine.compute_indicators")
+@patch("skills.data_fetch_skill.fetch_ticker_snapshot")
+@patch("config.startup.StartupService")
+def test_main_skips_ticker_whose_fetch_fails_and_continues_watchlist(
+    mock_startup_cls,
+    mock_fetch_snapshot,
+    mock_compute_indicators,
+    mock_summarize_latest,
+    mock_generate_suggestion,
+    mock_save_suggestion,
+    mock_notify_suggestion,
+):
+    mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["DELISTED", "AAPL"], default_timeframe="1h")
+    mock_fetch_snapshot.side_effect = [ValueError("No OHLCV data returned for DELISTED (1h)"), {"ohlcv": MagicMock(), "news": []}]
+    mock_summarize_latest.return_value = {"rsi_14": 50.0}
+    buy_suggestion = {"ticker": "AAPL", "action": "BUY", "confidence": 0.8}
+    mock_generate_suggestion.return_value = buy_suggestion
+
+    main()
+
+    mock_generate_suggestion.assert_called_once()
+    mock_save_suggestion.assert_called_once()
+    mock_notify_suggestion.assert_called_once_with(buy_suggestion)

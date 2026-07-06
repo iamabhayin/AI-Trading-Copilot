@@ -34,7 +34,7 @@ import anthropic
 from config.settings import Settings
 from db.database import execute, fetch_all, fetch_one
 
-MODEL = "claude-opus-4-8"
+MODEL = "claude-sonnet-5"
 
 RISK_JUDGMENT_SCHEMA = {
     "type": "object",
