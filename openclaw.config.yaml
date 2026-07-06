@@ -5,11 +5,11 @@
 # what should be scheduled without having to query the Gateway. Keep it in
 # sync by hand whenever the real jobs change.
 #
-# STATUS as of 2026-07-06: NOT YET LIVE. `openclaw cron add` for all 4 jobs
-# below failed with "scope upgrade pending approval" — this CLI session's
-# device is paired read-only and needs an already-privileged device/session
-# to run `openclaw devices approve <requestId>` before jobs can actually be
-# created. Run `openclaw cron list` to confirm whether jobs exist for real.
+# STATUS as of 2026-07-06: LIVE. All 4 jobs below are created on the Gateway
+# (confirmed via `openclaw cron list`) with delivery mode "none" — each
+# script sends its own Telegram/Discord notifications directly via
+# notify_skill.route_message(), so OpenClaw's own announce/deliver fallback
+# is disabled to avoid a spurious "no route" failure on every run.
 
 scheduler:
   # Full pipeline: data fetch -> indicator engine -> signal skill -> notify skill.
