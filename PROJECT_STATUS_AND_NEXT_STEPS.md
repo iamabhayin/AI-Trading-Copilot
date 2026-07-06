@@ -173,3 +173,29 @@ replying back confirming what was tracked.
 - Security hardening: lock `plugins.allow` explicitly (a dummy placeholder value, not an empty
   array — empty array is a known OpenClaw bug that silently allows everything) once the Codex
   plugin auto-load issue is confirmed fully resolved.
+
+---
+
+## 6. Planned feature (not started): move watchlist out of `.env`, manage via Discord "Add X" / "Remove X"
+
+Requested 2026-07-06, deferred for later. Full implementation plan (already scoped, ready to
+build when picked back up) was written to `C:\Users\abhay\.claude\plans\i-want-a-new-cosmic-frost.md`.
+
+Summary:
+- Watchlist currently lives as one comma-separated `WATCHLIST` env var in `.env`, parsed by
+  `Config._split_watchlist()` in `config/settings.py` (58 tickers today). Move it to a new
+  gitignored `config/watchlist.json` (JSON array), read/written by a new `config/watchlist_store.py`
+  (`load_watchlist`/`save_watchlist`/`normalize_ticker`/`add_ticker`/`remove_ticker`).
+- Add a third OpenClaw-exec'd skill, `skills/watchlist_skill.py`, same shape as
+  `position_tracker_skill.py` — parses "Add SBIN" / "Remove TCS" style messages, mutates
+  `config/watchlist.json`, replies with a confirmation string.
+- Ticker input must be the **real ticker symbol** (decided against nickname/alias resolution —
+  "Add SBI" adds literal `SBI.NS`, not `SBIN.NS`); normalized to uppercase with `.NS` auto-appended
+  if no exchange suffix given.
+- Wire it in exactly like the existing two skills (Phase 9 pattern): a third routing rule in
+  `BOOT.md` + the live `~/.openclaw/workspace/AGENTS.md`, and a third allowlist entry in
+  `~/.openclaw/exec-approvals.json` (both plain local files, no blocked `openclaw` CLI mutation
+  needed).
+- The 5 existing consumers of `settings.watchlist` (`signal_skill.py`, `data_fetch_skill.py`,
+  `indicator_engine.py`, `notify_skill.py`, `chat_skill.py`) need **no changes** — only
+  `ConfigLoader.load()`'s watchlist population changes.
