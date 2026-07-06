@@ -45,12 +45,14 @@ Each phase is its own branch off `develop` (see repo's branching strategy), merg
 | 0 | Validation phase — 5-stock watchlist, Ollama for filtering/extraction + Claude Haiku for signal synthesis, paper trading only | Cheap go/no-go gate before real spend or real trading | Skipped |
 | 1 | Data fetch + indicator engine (plain Python, console output) | No OpenClaw yet — validate data pipeline first | ✅ Done — merged into `develop` (PR #1) |
 | 2 | Signal skill with Claude API call | Still console-only, sanity-check suggestions | ✅ Done — merged into `develop` (PR #3) |
-| 3 | Install OpenClaw on VPS, wire Telegram notify skill | First real message delivery | ✅ Skill code done and merged into `develop` (PR #5). OpenClaw VPS install and live Telegram credentials are still pending manual setup — see below |
+| 3 | Install OpenClaw, wire Telegram notify skill | First real message delivery | ✅ Done — merged into `develop` (PR #5). Live Telegram delivery confirmed working |
 | 4 | Position tracker (reply parsing → SQLite) | "Bought X" flow working end-to-end | ✅ Done — merged into `develop` (PR #7) |
 | 5 | Monitor skill (code tripwire + agent risk judgment) | Light daily/twice-daily check, not tight polling | ✅ Done — merged into `develop` (PR #10) |
 | 6 | Chat skill (conversational Q&A) | Free-form follow-up questions | ✅ Done — merged into `develop` (PR #12) |
 | 7 | Cleanup skill (manual command) | Final piece | ✅ Done — merged into `develop` (PR #14) |
-| 8+ | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | ✅ Done — merged into `main` (PR #16) |
+| 8 | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | ✅ Done — merged into `main` (PR #16) |
+| 9 | Inbound message routing (CLI entry points, OpenClaw agent dispatch) | Turns Discord/Telegram replies into real Position Tracker / Chat Skill calls | ✅ Done — merged into `develop` (PR #18) |
+| 10 | 1h timeframe migration + live 3x/day scheduler | Real cron jobs on the OpenClaw Gateway, not just config | ✅ Done — merged into `develop` (PR #19) |
 
 ## Phase Status
 
@@ -58,24 +60,24 @@ Detail behind the Build order table above — what each completed skill does, wh
 
 ### Phase 1 — Data Fetch + Indicator Engine
 
-- **`skills/data_fetch_skill.py`** — pulls OHLCV candles (yfinance for now; a later phase swaps in the live broker API behind the same `fetch_ohlcv` signature), pulls news headlines (NewsAPI, falling back to Finnhub), and runs a coarse Ollama relevance filter on those headlines. Returns `[]` for news if no provider key is configured, and fails open (passes headlines through unfiltered) if `OLLAMA_HOST` is unset or unreachable — the pipeline still runs end-to-end without either.
-- **`skills/indicator_engine.py`** — computes RSI, MACD, EMA-20/50 crossover, Bollinger Bands, ADX, a volume-anomaly flag, and rolling support/resistance via `pandas-ta`, tagged with the configurable timeframe (`1h`/`4h`/`1d`/`1wk`).
-- **Tested:** `tests/test_data_fetch_skill.py` (8 tests — OHLCV column normalization, empty-result handling, NewsAPI parsing, Ollama relevance filtering including its fail-open path) and `tests/test_indicator_engine.py` (8 tests — expected columns present, RSI bounds, support ≤ resistance, missing-column validation, timeframe tagging). All network calls (yfinance, requests) are mocked.
+- **`skills/data_fetch_skill.py`** — pulls OHLCV candles (yfinance for now; a later phase swaps in the live broker API behind the same `fetch_ohlcv` signature), pulls news headlines (NewsAPI, falling back to Finnhub), and runs a coarse Ollama relevance filter on those headlines. Returns `[]` for news if no provider key is configured, and fails open (passes headlines through unfiltered) if `OLLAMA_HOST` is unset or unreachable — the pipeline still runs end-to-end without either. Defaults to `1h` candles (see Phase 10).
+- **`skills/indicator_engine.py`** — computes exactly 3 indicators via `pandas-ta`: RSI-14, an EMA(14-day)/EMA(50-day) pair, and Bollinger Bands (20-period). "14-day"/"50-day" are calendar trading days, not candle counts — a `TRADING_HOURS_PER_DAY = 6.25` constant converts them to the right candle lookback for whatever `timeframe` is passed (e.g. ~88/~312 candles on `1h`). See Phase 10 for why this replaced an earlier, broader indicator set.
+- **Tested:** `tests/test_data_fetch_skill.py` (8 tests — OHLCV column normalization, empty-result handling, NewsAPI parsing, Ollama relevance filtering including its fail-open path) and `tests/test_indicator_engine.py` (16 tests — expected columns present, RSI/Bollinger periods staying fixed across timeframes, the calendar-day→candle conversion, missing-column validation, timeframe tagging/default). All network calls (yfinance, requests) are mocked.
 
 ### Phase 2 — Signal Skill
 
-- **`skills/signal_skill.py`** — sends indicator + relevance-filtered news context to Claude (`claude-opus-4-8`), forcing structured JSON output via `output_config.format` (a schema, not a prefill) so the response always matches `{ticker, action, entry, stop_loss, target, confidence, rationale}` exactly. Persists suggestions to the `suggestions` table and ranks non-HOLD suggestions into a confidence-sorted shortlist.
-- **Tested:** `tests/test_signal_skill.py` (5 tests — structured response parsing, refusal handling, DB insert parameters, shortlist ranking/filtering/limit). The Anthropic client is mocked.
+- **`skills/signal_skill.py`** — sends indicator + relevance-filtered news context to Claude (`claude-opus-4-8`), forcing structured JSON output via `output_config.format` (a schema, not a prefill) so the response always matches `{ticker, action, entry, stop_loss, target, confidence, rationale}` exactly. Persists suggestions to the `suggestions` table and ranks non-HOLD suggestions into a confidence-sorted shortlist. `main()` (added in Phase 10) is the actual scheduled pipeline entry point: fetch → indicators → signal → save → notify the shortlist, with per-ticker error isolation so one bad/delisted ticker can't take down the whole watchlist run.
+- **Tested:** `tests/test_signal_skill.py` (7 tests — structured response parsing, refusal handling, DB insert parameters, shortlist ranking/filtering/limit, the pipeline notifying only shortlisted suggestions, per-ticker failure isolation). The Anthropic client is mocked.
 
 ### Phase 3 — Telegram Notify Skill
 
 - **`skills/notify_skill.py`** — formats a suggestion into a Telegram message (deterministic template by default, with an optional Ollama phrasing pass that fails open to the template if Ollama isn't configured/reachable), then sends it via `python-telegram-bot`'s async `Bot.send_message` (wrapped in `asyncio.run` for a synchronous call site). Discord routing was added later, in Phase 8 (see below).
-- **Tested:** `tests/test_notify_skill.py` (10 tests — template formatting for BUY vs. HOLD, Ollama phrasing path and its fail-open behavior, missing-token/chat-id validation, the actual Telegram send call). Telegram and Ollama are both mocked — no real message has been sent from this environment (no bot token configured); see Pending manual setup below.
+- **Tested:** `tests/test_notify_skill.py` (10 of its 17 tests — template formatting for BUY vs. HOLD, Ollama phrasing path and its fail-open behavior, missing-token/chat-id validation, the actual Telegram send call; the other 7 are Phase 8's Discord routing tests). Telegram and Discord are both mocked in tests, but real credentials are configured and live delivery is confirmed working (see Phase 10's scheduled-run verification).
 
 ### Phase 4 — Position Tracker
 
-- **`skills/position_tracker_skill.py`** — parses free-form trade replies ("bought 10 RELIANCE @ 2950") via regex first, falling back to Ollama for phrasing regex can't match (fails open to `"unparsed"` rather than guessing). Opens a new `active` position linked to the most recent matching suggestion (for its stop-loss/target), and closes the most recent active position for a ticker on a "sold" reply, setting `exit_price`/`exit_time`.
-- **Tested:** `tests/test_position_tracker_skill.py` (18 tests — regex matching across phrasing variants, the Ollama fallback and its fail-open path, position open/close DB writes, and the top-level reply-handling dispatch). Verified once against a real local SQLite DB (not just mocks): an open followed by a close correctly updated the same row.
+- **`skills/position_tracker_skill.py`** — parses free-form trade replies ("bought 10 RELIANCE @ 2950") via regex first, falling back to Ollama for phrasing regex can't match (fails open to `"unparsed"` rather than guessing). Opens a new `active` position linked to the most recent matching suggestion (for its stop-loss/target), and closes the most recent active position for a ticker on a "sold" reply, setting `exit_price`/`exit_time`. `main(argv)` (added in Phase 9) is a real CLI entry point — `python skills/position_tracker_skill.py "bought 10 RELIANCE @ 2950"` — used by the OpenClaw agent to dispatch real inbound messages.
+- **Tested:** `tests/test_position_tracker_skill.py` (24 tests — regex matching across phrasing variants, the Ollama fallback and its fail-open path, position open/close DB writes, the top-level reply-handling dispatch, and the CLI entry point). Verified once against a real local SQLite DB (not just mocks): an open followed by a close correctly updated the same row.
 
 ### Phase 5 — Monitor Skill
 
@@ -84,8 +86,8 @@ Detail behind the Build order table above — what each completed skill does, wh
 
 ### Phase 6 — Chat Skill
 
-- **`skills/chat_skill.py`** — `known_tickers()` pools the watchlist with every ticker ever suggested/positioned/discussed; `extract_ticker()` matches an explicit mention against that set, falling back to the implicit last-discussed ticker. `answer_question()` re-fetches a fresh snapshot, builds a prompt from question + original suggestion + snapshot + recent history, and calls Claude for a plain-text answer (not structured JSON, unlike Signal/Monitor — this is free-form conversation). Persists both turns to `conversations`.
-- **Tested:** `tests/test_chat_skill.py` (16 tests — ticker resolution, prompt construction, the no-ticker-found path, refusal handling). Verified end-to-end against a real local DB and live watchlist data.
+- **`skills/chat_skill.py`** — `known_tickers()` pools the watchlist with every ticker ever suggested/positioned/discussed; `extract_ticker()` matches an explicit mention against that set, falling back to the implicit last-discussed ticker. `answer_question()` re-fetches a fresh snapshot, builds a prompt from question + original suggestion + snapshot + recent history, and calls Claude for a plain-text answer (not structured JSON, unlike Signal/Monitor — this is free-form conversation). Persists both turns to `conversations`. `main(argv)` (added in Phase 9) is a real CLI entry point — `python skills/chat_skill.py "why this stop-loss?"` — used by the OpenClaw agent to dispatch real inbound questions.
+- **Tested:** `tests/test_chat_skill.py` (19 tests — ticker resolution, prompt construction, the no-ticker-found path, refusal handling, the CLI entry point). Verified end-to-end against a real local DB and live watchlist data.
 
 ### Phase 7 — Cleanup Skill
 
@@ -97,19 +99,26 @@ Detail behind the Build order table above — what each completed skill does, wh
 
 - **`skills/notify_skill.py`** — `route_message(message_type, text)` is the shared routing layer: every message always goes to Telegram (primary action channel), and if Discord is configured for that message type, it also goes to the matching Discord channel (`market_news` / `signal` / `monitoring` / `chat` / `closed_trade`, mapped to the `DISCORD_CHANNEL_*` env vars — see the proposed channel split in the architecture doc's Section 3.4). `send_discord_message()` uses a one-shot `discord.Client` subclass (Discord's API is bot-client-based, unlike Telegram's stateless REST API) that connects, sends one message, and disconnects. A Discord failure is caught and logged but never blocks the Telegram send, since Telegram is primary. `monitor_skill.py` and `cleanup_skill.py` were updated to call `route_message()` instead of `send_telegram_message()` directly, so alerts route to `#monitoring` and cleanup confirmations still reach Telegram (no Discord channel is mapped for cleanup — an unmapped type just skips Discord).
 - **Tested:** `tests/test_notify_skill.py` grew by 7 tests (Discord send validation, routing to the right channel, skipping unmapped types, Discord failures not blocking Telegram). Verified end-to-end with real network calls: a fake Discord token produced Discord's actual "Improper token has been passed" rejection (proving a real connection attempt, not a mock), which was caught cleanly while the Telegram send still completed.
-- Two-way listening (a live bot process routing incoming Discord/Telegram messages to Position Tracker / Chat Skill) is *not* built — the architecture doc frames Phase 8 as adding Discord as a "reading/logging surface," and no persistent listener exists for Telegram either yet (that's OpenClaw's job once actually deployed — see Pending manual setup).
+- Two-way listening (a live bot routing incoming Discord/Telegram messages to Position Tracker / Chat Skill) was *not yet* built as of Phase 8 — that gap was closed in Phase 9, below.
+
+### Phase 9 — Inbound Message Routing
+
+- **CLI entry points**: `position_tracker_skill.py` and `chat_skill.py` gained real `main(argv)` functions (see Phase 4/6 above), replacing their old hardcoded demo `__main__` blocks, so they can be invoked with an arbitrary real message from the command line — the piece that makes them callable by an external agent at all.
+- **`BOOT.md` + `AGENTS.md`** (in the OpenClaw workspace, not this repo) give the OpenClaw Discord agent plain-language routing rules: if a message looks like a trade confirmation, run `position_tracker_skill.py`; if it's a question, run `chat_skill.py`; otherwise respond conversationally. `AGENTS.md` carries the *standing* rule since `boot-md` only fires once at gateway startup, not per message.
+- **Scoped the agent's `exec` tool** to only these two scripts (with a message argument), not arbitrary shell commands — since Discord input is technically untrusted even from a single known user. This scoping mattered again in Phase 10 (see below).
+- Also fixed an Ollama request timeout that was too tight (15s → 30s) for slower local inference.
+- Verified live end-to-end: a real `@mention` in Discord correctly triggered `position_tracker_skill.py`/`chat_skill.py` and replied with the real result.
+
+### Phase 10 — 1h Timeframe Migration + Live Scheduler
+
+- **Indicator engine migrated from `1d` to `1h` candles**, and trimmed from 7 computed indicators down to exactly the 3 actually used for trading (see Phase 1's updated description above) — dropped MACD, ADX, the old EMA-20/50 crossover flag, volume anomaly, and rolling support/resistance.
+- **`signal_skill.py` now notifies its own shortlist** — previously neither it nor `notify_skill.py` actually sent a notification for a completed pipeline run; now `main()` calls `notify_suggestion()` for each shortlisted (non-HOLD) suggestion, making it the real, complete scheduled pipeline entry point.
+- **The scheduler is genuinely live**: 4 real jobs on the OpenClaw Gateway (via `openclaw cron add`, not `openclaw.config.yaml` — that file is a documentation-only placeholder OpenClaw never reads) — `pre_market_run` (08:30 IST), `midday_run` (12:00 IST), `pre_close_run` (14:45 IST), and `monitor_check` (15:35 IST), all Mon–Fri. Jobs are plain command payloads (direct `argv`, not a shell string) rather than agent-turn jobs, so they run deterministically without depending on a shell binary or routing through the agent's (deliberately narrow, see Phase 9) exec-approvals allowlist.
+- Verified live end-to-end: a real scheduled run produced a real BUY suggestion that was delivered to the configured Discord signals channel, and the position-monitor job ran clean with no open positions.
 
 ### Test summary
 
-96 tests total across all 8 phases. Run with `pytest`.
-
-## Pending manual setup
-
-Left for later, deliberately not automated by the assistant:
-
-- **Telegram credentials.** `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `.env` are still empty. Create a bot via [@BotFather](https://t.me/BotFather), get your chat ID, fill in `.env`, then run `python skills/notify_skill.py` to confirm a real message actually arrives.
-- **Discord credentials.** `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, and the per-channel `DISCORD_CHANNEL_*` IDs in `.env` are still empty. Create a Discord application/bot, invite it to your server with `Send Messages` permission on the channels in the proposed split (`#market-news`, `#signals`, `#monitoring`, `#chat`, `#closed-trades`), and fill in the channel IDs.
-- **Install OpenClaw on a VPS.** Section 10 of the architecture doc covers the setup guide (Node.js 22+ on the VPS, OpenClaw install, scheduler wiring). Once a VPS is available, flip `scheduler.pre_market_run` / `post_market_run` / `monitor_check` to `enabled: true` in `openclaw.config.yaml` and set their `cron` values.
+115 tests total (includes 5 for `config/startup.py`'s `StartupService`, added during the structure refactor between Phases 4 and 5). Run with `pytest`.
 
 ## Notes
 
