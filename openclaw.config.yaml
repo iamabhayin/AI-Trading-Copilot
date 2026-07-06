@@ -1,22 +1,49 @@
-# OpenClaw orchestration config — placeholder scaffold.
-# Real skill/channel bindings get filled in as each phase (see README) lands.
+# OpenClaw orchestration config — documentation scaffold only.
+# OpenClaw does NOT read this file. Real scheduling lives on the Gateway
+# itself, managed via `openclaw cron add/edit/list/rm` (see docs.openclaw.ai/cli/cron).
+# This section documents the intended/target schedule so a reader knows
+# what should be scheduled without having to query the Gateway. Keep it in
+# sync by hand whenever the real jobs change.
+#
+# STATUS as of 2026-07-06: NOT YET LIVE. `openclaw cron add` for all 4 jobs
+# below failed with "scope upgrade pending approval" — this CLI session's
+# device is paired read-only and needs an already-privileged device/session
+# to run `openclaw devices approve <requestId>` before jobs can actually be
+# created. Run `openclaw cron list` to confirm whether jobs exist for real.
 
 scheduler:
-  # Pre-market run: data fetch + indicator engine + signal skill -> notify skill
+  # Full pipeline: data fetch -> indicator engine -> signal skill -> notify skill.
+  # Overnight news + gap check before the market opens.
   pre_market_run:
-    enabled: false  # TODO: enable once running on the OpenClaw VPS
-    # cron: ""      # TODO: set once broker/market-hours timezone is finalized
+    enabled: true
+    cron: "30 8 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/signal_skill.py
 
-  # Post-market run: same pipeline, end-of-day read
-  post_market_run:
-    enabled: false  # TODO: enable once running on the OpenClaw VPS
-    # cron: ""      # TODO: set once broker/market-hours timezone is finalized
+  # Full pipeline, repurposed from the old post_market_run slot. Catches
+  # intraday shifts missed at the pre-market run.
+  midday_run:
+    enabled: true
+    cron: "0 12 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/signal_skill.py
 
-  # Light daily/twice-daily monitor check (Claude risk judgment on open positions,
-  # not tight intraday polling — hard SL/target handled by broker GTT/OCO)
+  # Full pipeline, repurposed from the old monitor_check slot. Last check
+  # before market close.
+  pre_close_run:
+    enabled: true
+    cron: "45 14 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/signal_skill.py
+
+  # Position risk-check (Claude risk judgment + stop-loss/target trigger on
+  # open positions) — moved to its own slot since monitor_check's original
+  # name now belongs to a signal-pipeline run above. Runs after market close.
   monitor_check:
-    enabled: false  # TODO: enable once running on the OpenClaw VPS
-    # cron: ""      # TODO: align with pre-market/post-market run times
+    enabled: true
+    cron: "35 15 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/monitor_skill.py
 
 skills:
   - name: data_fetch_skill
