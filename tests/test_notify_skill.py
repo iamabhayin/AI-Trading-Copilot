@@ -11,7 +11,10 @@ import pytest
 
 from skills.notify_skill import (
     _template_message,
+    build_market_news_digest,
     format_suggestion_message,
+    main,
+    notify_market_news_digest,
     notify_suggestion,
     route_message,
     send_discord_message,
@@ -247,3 +250,68 @@ def test_route_message_discord_failure_does_not_block_telegram(mock_settings_loa
     route_message("signal", "hello")  # must not raise
 
     mock_bot_instance.send_message.assert_awaited_once()
+
+
+@patch("skills.data_fetch_skill.filter_news_relevance")
+@patch("skills.data_fetch_skill.fetch_news")
+def test_build_market_news_digest_includes_relevant_headlines_per_ticker(mock_fetch_news, mock_filter):
+    mock_fetch_news.return_value = ["raw"]
+    mock_filter.side_effect = [
+        [{"headline": "AAPL beats earnings", "relevant": True}],
+        [{"headline": "MSFT irrelevant blip", "relevant": False}],
+    ]
+
+    digest = build_market_news_digest(["AAPL", "MSFT"])
+
+    assert "*AAPL*" in digest
+    assert "AAPL beats earnings" in digest
+    assert "MSFT" not in digest.replace("Market News Digest", "")
+
+
+@patch("skills.data_fetch_skill.filter_news_relevance")
+@patch("skills.data_fetch_skill.fetch_news")
+def test_build_market_news_digest_caps_headlines_per_ticker(mock_fetch_news, mock_filter):
+    mock_fetch_news.return_value = ["raw"]
+    mock_filter.return_value = [{"headline": f"headline {i}", "relevant": True} for i in range(5)]
+
+    digest = build_market_news_digest(["AAPL"])
+
+    assert digest.count("- headline") == 3
+
+
+@patch("skills.data_fetch_skill.filter_news_relevance", return_value=[])
+@patch("skills.data_fetch_skill.fetch_news", return_value=[])
+def test_build_market_news_digest_returns_fallback_when_nothing_relevant(mock_fetch_news, mock_filter):
+    digest = build_market_news_digest(["AAPL", "MSFT"])
+    assert digest == "*Market News Digest*\nNo notable headlines for your watchlist right now."
+
+
+@patch("skills.notify_skill.route_message")
+@patch("skills.notify_skill.build_market_news_digest", return_value="*Market News Digest*\n\n*AAPL*\n- headline")
+def test_notify_market_news_digest_routes_as_market_news_type(mock_build_digest, mock_route_message):
+    notify_market_news_digest(["AAPL"])
+
+    mock_build_digest.assert_called_once_with(["AAPL"])
+    mock_route_message.assert_called_once_with("market_news", "*Market News Digest*\n\n*AAPL*\n- headline")
+
+
+@patch("skills.notify_skill.notify_market_news_digest")
+@patch("config.startup.StartupService")
+def test_main_with_digest_flag_sends_digest(mock_startup_cls, mock_notify_digest, capsys):
+    mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["AAPL", "MSFT"])
+
+    main(["--digest"])
+
+    mock_notify_digest.assert_called_once_with(["AAPL", "MSFT"])
+    assert "Digest sent." in capsys.readouterr().out
+
+
+@patch("skills.notify_skill.notify_suggestion")
+@patch("skills.notify_skill.fetch_one", return_value=None)
+@patch("config.startup.StartupService")
+def test_main_without_digest_flag_keeps_original_behavior(mock_startup_cls, mock_fetch_one, mock_notify_suggestion):
+    mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["AAPL"])
+
+    main([])
+
+    mock_notify_suggestion.assert_called_once()

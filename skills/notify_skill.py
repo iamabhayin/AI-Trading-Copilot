@@ -167,10 +167,51 @@ def notify_suggestion(suggestion: dict) -> None:
     route_message("signal", format_suggestion_message(suggestion))
 
 
-if __name__ == "__main__":
+def build_market_news_digest(watchlist: list[str]) -> str:
+    """Build a plain-text roundup of relevant recent headlines per
+    watchlist ticker, reusing the same fetch + Ollama relevance filter as
+    the main pipeline. Deterministic formatting, no LLM phrasing pass —
+    this is a headline roundup, not a trade suggestion.
+    """
+    from skills.data_fetch_skill import fetch_news, filter_news_relevance
+
+    sections = []
+    for ticker in watchlist:
+        relevant = [item for item in filter_news_relevance(ticker, fetch_news(ticker)) if item.get("relevant")]
+        if not relevant:
+            continue
+        headlines = "\n".join(f"- {item['headline']}" for item in relevant[:3])
+        sections.append(f"*{ticker}*\n{headlines}")
+
+    if not sections:
+        return "*Market News Digest*\nNo notable headlines for your watchlist right now."
+    return "*Market News Digest*\n\n" + "\n\n".join(sections)
+
+
+def notify_market_news_digest(watchlist: list[str]) -> None:
+    """Build and send the market news digest — Telegram always, plus
+    #market-news on Discord if configured. The synchronous entry point
+    used by the morning/evening scheduled cron jobs.
+    """
+    route_message("market_news", build_market_news_digest(watchlist))
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI/cron entry point.
+
+    `python notify_skill.py --digest` sends the market news digest for the
+    configured watchlist. With no arguments, falls back to notifying the
+    latest suggestion in the DB (or a demo message) — unchanged from before.
+    """
     from config.startup import StartupService
 
-    StartupService().start()
+    args = argv if argv is not None else sys.argv[1:]
+    settings = StartupService().start()
+
+    if "--digest" in args:
+        notify_market_news_digest(settings.watchlist or ["AAPL"])
+        print("Digest sent.")
+        return
 
     row = fetch_one("SELECT * FROM suggestions ORDER BY created_at DESC LIMIT 1")
     if row:
@@ -192,3 +233,7 @@ if __name__ == "__main__":
     print(format_suggestion_message(suggestion))
     notify_suggestion(suggestion)
     print("Sent.")
+
+
+if __name__ == "__main__":
+    main()
