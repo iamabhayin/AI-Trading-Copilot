@@ -24,7 +24,7 @@ import anthropic
 from config.settings import Settings
 from db.database import execute
 
-MODEL = "claude-opus-4-8"
+MODEL = "claude-sonnet-5"
 
 VALID_ACTIONS = {"BUY", "SELL", "HOLD"}
 
