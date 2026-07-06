@@ -26,7 +26,7 @@ import anthropic
 from config.settings import Settings
 from db.database import execute, fetch_all, fetch_one
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = (
     "You are a trading assistant answering a follow-up question about a "
