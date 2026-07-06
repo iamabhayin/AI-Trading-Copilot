@@ -5,11 +5,17 @@
 # what should be scheduled without having to query the Gateway. Keep it in
 # sync by hand whenever the real jobs change.
 #
-# STATUS as of 2026-07-06: LIVE. All 4 jobs below are created on the Gateway
-# (confirmed via `openclaw cron list`) with delivery mode "none" — each
-# script sends its own Telegram/Discord notifications directly via
-# notify_skill.route_message(), so OpenClaw's own announce/deliver fallback
-# is disabled to avoid a spurious "no route" failure on every run.
+# STATUS as of 2026-07-06: LIVE, as plain command-payload jobs (NOT agent
+# turns). Two failure modes were hit and fixed today: (1) command payloads
+# default to `sh -lc "<command>"`, but this Windows Gateway has no `sh` on
+# PATH -- fixed by using a direct argv array instead of a shell string.
+# (2) something (the user's own OpenClaw Discord agent) briefly converted
+# all 4 jobs into agentTurn payloads that ask the AGENT to run the command
+# via its own exec tool -- this got correctly blocked by the exec-approvals
+# allowlist (only position_tracker_skill.py/chat_skill.py are pre-approved),
+# and doesn't belong here anyway. Keep these as plain command payloads with
+# direct argv going forward; delivery mode "none" since each script sends
+# its own Telegram/Discord notifications via notify_skill.route_message().
 
 scheduler:
   # Full pipeline: data fetch -> indicator engine -> signal skill -> notify skill.
