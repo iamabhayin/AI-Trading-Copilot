@@ -51,6 +51,22 @@ scheduler:
     timezone: Asia/Kolkata
     command: .venv/Scripts/python.exe skills/monitor_skill.py
 
+  # Market news digest: relevant recent headlines per watchlist ticker,
+  # independent of whether any ticker actually triggers a BUY/SELL signal.
+  # Reuses the existing news fetch + Ollama relevance filter -- no extra
+  # Claude cost. Routes to the #market-news Discord channel if configured.
+  morning_news_digest:
+    enabled: true
+    cron: "0 8 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/notify_skill.py --digest
+
+  evening_news_digest:
+    enabled: true
+    cron: "0 18 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/notify_skill.py --digest
+
 skills:
   - name: data_fetch_skill
     enabled: true
