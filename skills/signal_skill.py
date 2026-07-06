@@ -133,9 +133,13 @@ def main() -> None:
     suggestions = []
     for ticker in watchlist:
         print(f"--- {ticker} ---")
-        snapshot = fetch_ticker_snapshot(ticker, timeframe)
-        indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
-        suggestion = generate_suggestion(ticker, indicators, snapshot["news"])
+        try:
+            snapshot = fetch_ticker_snapshot(ticker, timeframe)
+            indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
+            suggestion = generate_suggestion(ticker, indicators, snapshot["news"])
+        except Exception as exc:  # one bad/delisted ticker must not block the rest of the watchlist
+            print(f"  skipping {ticker}: {exc}")
+            continue
         print(json.dumps(suggestion, indent=2))
         save_suggestion(suggestion, timeframe)
         suggestions.append(suggestion)
