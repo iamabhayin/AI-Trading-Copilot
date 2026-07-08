@@ -67,6 +67,22 @@ scheduler:
     timezone: Asia/Kolkata
     command: .venv/Scripts/python.exe skills/notify_skill.py --digest
 
+  # Jaipur 24K gold + silver rate digest. Standalone, no trading judgment
+  # (pure fetch-and-format via a public rate aggregator, Ollama phrasing
+  # only) -- not part of the NSE signal pipeline. Discord #market-news
+  # only, no Telegram (passive digest, not an actionable trade alert).
+  metals_price_morning:
+    enabled: true
+    cron: "30 8 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/metals_price_skill.py
+
+  metals_price_evening:
+    enabled: true
+    cron: "15 18 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/metals_price_skill.py
+
 skills:
   - name: data_fetch_skill
     enabled: true
@@ -87,6 +103,9 @@ skills:
   - name: cleanup_skill
     enabled: true
     manual_only: true
+  # Standalone Jaipur gold/silver digest, not part of the NSE signal pipeline
+  - name: metals_price_skill
+    enabled: true
 
 channels:
   telegram:
