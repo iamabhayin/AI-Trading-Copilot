@@ -8,12 +8,29 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skills.signal_skill import generate_suggestion, main, save_suggestion, shortlist
+from skills.signal_skill import SYSTEM_PROMPT, _build_user_prompt, generate_suggestion, main, save_suggestion, shortlist
 
 
 def _mock_response(payload: dict, stop_reason: str = "end_turn"):
     text_block = MagicMock(type="text", text=json.dumps(payload))
     return MagicMock(content=[text_block], stop_reason=stop_reason, stop_details=None)
+
+
+def test_system_prompt_names_expected_chart_patterns():
+    prompt_lower = SYSTEM_PROMPT.lower()
+    assert "pullback" in prompt_lower
+    assert "golden/death cross" in prompt_lower
+    assert "squeeze" in prompt_lower
+    assert "recent history" in prompt_lower or "history window" in prompt_lower
+
+
+def test_build_user_prompt_includes_recent_history():
+    recent = [{"close": 100.0, "ema_14d": 99.0}, {"close": 101.0, "ema_14d": 99.5}]
+
+    prompt = _build_user_prompt("AAPL", {"rsi_14": 50.0}, [], recent)
+
+    assert json.dumps(recent) in prompt
+    assert "Recent history" in prompt
 
 
 @patch("skills.signal_skill.anthropic.Anthropic")
@@ -33,7 +50,7 @@ def test_generate_suggestion_returns_structured_dict(mock_settings_load, mock_an
     )
     mock_anthropic_cls.return_value = mock_client
 
-    suggestion = generate_suggestion("AAPL", {"rsi_14": 28.0}, [])
+    suggestion = generate_suggestion("AAPL", {"rsi_14": 28.0}, [], [])
 
     assert suggestion["ticker"] == "AAPL"
     assert suggestion["action"] == "BUY"
@@ -53,7 +70,7 @@ def test_generate_suggestion_raises_on_refusal(mock_settings_load, mock_anthropi
     mock_anthropic_cls.return_value = mock_client
 
     with pytest.raises(RuntimeError):
-        generate_suggestion("AAPL", {}, [])
+        generate_suggestion("AAPL", {}, [], [])
 
 
 @patch("skills.signal_skill.execute")
@@ -102,6 +119,7 @@ def test_shortlist_respects_limit():
 @patch("skills.notify_skill.notify_suggestion")
 @patch("skills.signal_skill.save_suggestion")
 @patch("skills.signal_skill.generate_suggestion")
+@patch("skills.indicator_engine.summarize_recent")
 @patch("skills.indicator_engine.summarize_latest")
 @patch("skills.indicator_engine.compute_indicators")
 @patch("skills.data_fetch_skill.fetch_ticker_snapshot")
@@ -111,6 +129,7 @@ def test_main_notifies_only_shortlisted_suggestions(
     mock_fetch_snapshot,
     mock_compute_indicators,
     mock_summarize_latest,
+    mock_summarize_recent,
     mock_generate_suggestion,
     mock_save_suggestion,
     mock_notify_suggestion,
@@ -118,6 +137,7 @@ def test_main_notifies_only_shortlisted_suggestions(
     mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["AAPL", "MSFT"], default_timeframe="1h")
     mock_fetch_snapshot.return_value = {"ohlcv": MagicMock(), "news": []}
     mock_summarize_latest.return_value = {"rsi_14": 50.0}
+    mock_summarize_recent.return_value = [{"rsi_14": 50.0}]
     buy_suggestion = {"ticker": "AAPL", "action": "BUY", "confidence": 0.8}
     hold_suggestion = {"ticker": "MSFT", "action": "HOLD", "confidence": 0.5}
     mock_generate_suggestion.side_effect = [buy_suggestion, hold_suggestion]
@@ -131,6 +151,7 @@ def test_main_notifies_only_shortlisted_suggestions(
 @patch("skills.notify_skill.notify_suggestion")
 @patch("skills.signal_skill.save_suggestion")
 @patch("skills.signal_skill.generate_suggestion")
+@patch("skills.indicator_engine.summarize_recent")
 @patch("skills.indicator_engine.summarize_latest")
 @patch("skills.indicator_engine.compute_indicators")
 @patch("skills.data_fetch_skill.fetch_ticker_snapshot")
@@ -140,6 +161,7 @@ def test_main_skips_ticker_whose_fetch_fails_and_continues_watchlist(
     mock_fetch_snapshot,
     mock_compute_indicators,
     mock_summarize_latest,
+    mock_summarize_recent,
     mock_generate_suggestion,
     mock_save_suggestion,
     mock_notify_suggestion,
@@ -147,6 +169,7 @@ def test_main_skips_ticker_whose_fetch_fails_and_continues_watchlist(
     mock_startup_cls.return_value.start.return_value = MagicMock(watchlist=["DELISTED", "AAPL"], default_timeframe="1h")
     mock_fetch_snapshot.side_effect = [ValueError("No OHLCV data returned for DELISTED (1h)"), {"ohlcv": MagicMock(), "news": []}]
     mock_summarize_latest.return_value = {"rsi_14": 50.0}
+    mock_summarize_recent.return_value = [{"rsi_14": 50.0}]
     buy_suggestion = {"ticker": "AAPL", "action": "BUY", "confidence": 0.8}
     mock_generate_suggestion.return_value = buy_suggestion
 

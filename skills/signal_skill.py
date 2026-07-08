@@ -36,7 +36,27 @@ SYSTEM_PROMPT = (
     "14-day/50-day EMA pair, and Bollinger Bands). For HOLD, entry/"
     "stop_loss/target may be null. Give a confidence score between 0 and 1, "
     "and a short rationale grounded in the specific indicator values and "
-    "headlines you were given."
+    "headlines you were given. "
+    "Actively check the indicator snapshot for these named setups, and if "
+    "one is present, name it explicitly in the rationale — it may support "
+    "or contradict the action, use judgment, don't force a BUY just "
+    "because a pattern is present. Absence of a pattern doesn't rule out "
+    "BUY/SELL on other grounds, but when one is present, always name it: "
+    "(1) Pullback in an uptrend: close is above ema_50d (uptrend intact) "
+    "but has dipped toward ema_14d or bb_lower, with rsi_14 cooled into "
+    "roughly the 35-50 zone without breaking trend structure. Favors a BUY "
+    "with stop-loss just below the ema_14d/support level and target near "
+    "bb_upper or the prior swing high. "
+    "(2) EMA golden/death cross: check whether ema_14d crossed ema_50d "
+    "within the recent history window — crossing above is bullish, "
+    "crossing below is bearish — signaling a potential trend shift, "
+    "especially when rsi_14 confirms the same direction. "
+    "(3) Bollinger Band squeeze/breakout: check whether bb_upper minus "
+    "bb_lower has been narrowing across the recent history window before "
+    "comparing to the current spread (a narrowing-then-widening spread is "
+    "low volatility building toward a breakout), followed by close "
+    "pushing through either band, ideally with rsi_14 confirming momentum "
+    "in the breakout direction."
 )
 
 SUGGESTION_SCHEMA = {
@@ -54,16 +74,17 @@ SUGGESTION_SCHEMA = {
 }
 
 
-def _build_user_prompt(ticker: str, indicators: dict, news: list[dict]) -> str:
+def _build_user_prompt(ticker: str, indicators: dict, news: list[dict], recent: list[dict]) -> str:
     relevant_headlines = [item["headline"] for item in news if item.get("relevant")]
     return (
         f"Ticker: {ticker}\n"
         f"Indicators: {json.dumps(indicators, sort_keys=True)}\n"
+        f"Recent history (oldest to newest): {json.dumps(recent)}\n"
         f"Relevant recent headlines: {json.dumps(relevant_headlines)}"
     )
 
 
-def generate_suggestion(ticker: str, indicators: dict, news: list[dict]) -> dict:
+def generate_suggestion(ticker: str, indicators: dict, news: list[dict], recent: list[dict]) -> dict:
     """Call Claude with indicator + news context and return a validated,
     structured suggestion: {ticker, action, entry, stop_loss, target,
     confidence, rationale}.
@@ -76,7 +97,7 @@ def generate_suggestion(ticker: str, indicators: dict, news: list[dict]) -> dict
         max_tokens=2048,
         system=SYSTEM_PROMPT,
         output_config={"format": {"type": "json_schema", "schema": SUGGESTION_SCHEMA}},
-        messages=[{"role": "user", "content": _build_user_prompt(ticker, indicators, news)}],
+        messages=[{"role": "user", "content": _build_user_prompt(ticker, indicators, news, recent)}],
     )
 
     if response.stop_reason == "refusal":
@@ -123,7 +144,7 @@ def main() -> None:
     """
     from config.startup import StartupService
     from skills.data_fetch_skill import fetch_ticker_snapshot
-    from skills.indicator_engine import compute_indicators, summarize_latest
+    from skills.indicator_engine import compute_indicators, summarize_latest, summarize_recent
     from skills.notify_skill import notify_suggestion
 
     settings = StartupService().start()
@@ -135,8 +156,10 @@ def main() -> None:
         print(f"--- {ticker} ---")
         try:
             snapshot = fetch_ticker_snapshot(ticker, timeframe)
-            indicators = summarize_latest(compute_indicators(snapshot["ohlcv"], timeframe))
-            suggestion = generate_suggestion(ticker, indicators, snapshot["news"])
+            computed = compute_indicators(snapshot["ohlcv"], timeframe)
+            indicators = summarize_latest(computed)
+            recent = summarize_recent(computed)
+            suggestion = generate_suggestion(ticker, indicators, snapshot["news"], recent)
         except Exception as exc:  # one bad/delisted ticker must not block the rest of the watchlist
             print(f"  skipping {ticker}: {exc}")
             continue

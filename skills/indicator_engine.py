@@ -80,6 +80,27 @@ def summarize_latest(df: pd.DataFrame) -> dict:
     }
 
 
+def summarize_recent(df: pd.DataFrame, n: int = 10) -> list[dict]:
+    """Flatten the last `n` rows of an indicator DataFrame into a list of
+    plain dicts (oldest to newest) — the history window the Signal Skill
+    checks EMA cross and Bollinger Band squeeze setups against, since
+    `summarize_latest()` only exposes a single current-value snapshot.
+    """
+    timeframe = df.attrs.get("timeframe")
+    recent = df.iloc[-n:]
+    return [
+        {
+            "timeframe": timeframe,
+            "close": _safe_float(row.get("close")),
+            "ema_14d": _safe_float(row.get("ema_14d")),
+            "ema_50d": _safe_float(row.get("ema_50d")),
+            "bb_upper": _safe_float(row.get("BBU_20_2.0_2.0")),
+            "bb_lower": _safe_float(row.get("BBL_20_2.0_2.0")),
+        }
+        for _, row in recent.iterrows()
+    ]
+
+
 def _safe_float(value) -> float | None:
     return None if pd.isna(value) else float(value)
 
