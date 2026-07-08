@@ -7,7 +7,7 @@ import pandas as pd
 import pandas_ta as ta
 import pytest
 
-from skills.indicator_engine import _period_for_days, compute_indicators, summarize_latest
+from skills.indicator_engine import _period_for_days, compute_indicators, summarize_latest, summarize_recent
 
 # Captured before any test patches skills.indicator_engine.ta (the same
 # pandas_ta module object) so side_effect can delegate to the real
@@ -150,3 +150,25 @@ def test_summarize_latest_returns_flat_dict(sample_ohlcv):
     assert summary["timeframe"] == "1d"
     assert isinstance(summary["close"], float)
     assert set(summary) == {"timeframe", "close", "rsi_14", "ema_14d", "ema_50d", "bb_upper", "bb_lower"}
+
+
+def test_summarize_recent_returns_n_rows_oldest_to_newest(sample_ohlcv):
+    out = compute_indicators(sample_ohlcv, timeframe="1d")
+    recent = summarize_recent(out, n=10)
+
+    assert len(recent) == 10
+    assert set(recent[0]) == {"timeframe", "close", "ema_14d", "ema_50d", "bb_upper", "bb_lower"}
+    assert [row["close"] for row in recent] == out["close"].iloc[-10:].tolist()
+    assert recent[-1]["timeframe"] == "1d"
+
+
+def test_summarize_recent_handles_nan_via_safe_float(sample_ohlcv):
+    out = compute_indicators(sample_ohlcv, timeframe="1d")
+
+    # The first rows haven't warmed up yet (EMA/Bollinger need history), so
+    # they carry NaNs that _safe_float must convert to None.
+    recent = summarize_recent(out.iloc[:5], n=10)
+
+    assert len(recent) == 5
+    assert recent[0]["ema_50d"] is None
+    assert recent[0]["bb_upper"] is None
