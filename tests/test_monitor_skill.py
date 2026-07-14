@@ -11,8 +11,10 @@ import pytest
 
 from skills.monitor_skill import (
     already_alerted,
+    build_position_status,
     check_price_trigger,
     evaluate_risk_judgment,
+    format_status_digest,
     main,
     monitor_all_positions,
     monitor_position,
@@ -161,21 +163,111 @@ def test_monitor_all_positions_iterates_active_positions(mock_fetch_all, mock_mo
 
         mock_fetch_ohlcv.return_value = pd.DataFrame({"close": [2950.0, 2900.0]})
 
-        alerts = monitor_all_positions()
+        alerts, statuses = monitor_all_positions()
 
     assert len(alerts) == 1
+    assert len(statuses) == 1
+    assert statuses[0]["ticker"] == "RELIANCE"
     mock_monitor_position.assert_called_once()
     fetch_all_query = mock_fetch_all.call_args[0][0]
     assert "status = 'active'" in fetch_all_query
+
+
+@patch("skills.monitor_skill.monitor_position")
+@patch("skills.monitor_skill.fetch_all")
+def test_monitor_all_positions_skips_ticker_whose_fetch_fails_and_continues(mock_fetch_all, mock_monitor_position):
+    other_position = {**POSITION, "id": 2, "ticker": "DELISTED"}
+    mock_fetch_all.return_value = [dict(other_position), dict(POSITION)]
+    mock_monitor_position.return_value = []
+
+    with (
+        patch("skills.data_fetch_skill.fetch_ohlcv") as mock_fetch_ohlcv,
+        patch("skills.data_fetch_skill.fetch_news", return_value=[]),
+        patch("skills.data_fetch_skill.filter_news_relevance", return_value=[]),
+    ):
+        import pandas as pd
+
+        mock_fetch_ohlcv.side_effect = [ValueError("No OHLCV data returned for DELISTED"), pd.DataFrame({"close": [2950.0]})]
+
+        alerts, statuses = monitor_all_positions()
+
+    assert len(statuses) == 1
+    assert statuses[0]["ticker"] == "RELIANCE"
+
+
+def test_build_position_status_computes_distance_to_sl_and_target():
+    status = build_position_status(POSITION, 2870.0)
+
+    assert status["ticker"] == "RELIANCE"
+    assert status["current_price"] == 2870.0
+    assert status["distance_to_stop_loss_pct"] == pytest.approx((2870.0 - 2800.0) / 2870.0 * 100)
+    assert status["distance_to_target_pct"] == pytest.approx((3200.0 - 2870.0) / 2870.0 * 100)
+
+
+def test_build_position_status_handles_missing_levels():
+    position = {"ticker": "XYZ", "entry_price": 50.0, "stop_loss": None, "target": None}
+
+    status = build_position_status(position, 55.0)
+
+    assert status["distance_to_stop_loss_pct"] is None
+    assert status["distance_to_target_pct"] is None
+
+
+@patch("skills.monitor_skill.Settings.load")
+def test_format_status_digest_without_ollama_returns_template(mock_settings_load):
+    mock_settings_load.return_value = MagicMock(ollama_host="")
+    statuses = [build_position_status(POSITION, 2870.0)]
+
+    digest = format_status_digest(statuses)
+
+    assert "RELIANCE" in digest
+    assert "2870.00" in digest
+
+
+@patch("skills.monitor_skill.Settings.load")
+def test_format_status_digest_reports_no_active_positions(mock_settings_load):
+    mock_settings_load.return_value = MagicMock(ollama_host="")
+
+    digest = format_status_digest([])
+
+    assert "no active positions" in digest.lower()
+
+
+@patch("skills.monitor_skill.requests.post")
+@patch("skills.monitor_skill.Settings.load")
+def test_format_status_digest_uses_ollama_when_configured(mock_settings_load, mock_post):
+    mock_settings_load.return_value = MagicMock(ollama_host="http://localhost:11434", ollama_model="llama3")
+    mock_post.return_value = MagicMock(json=lambda: {"response": "Polished status digest"})
+    statuses = [build_position_status(POSITION, 2870.0)]
+
+    digest = format_status_digest(statuses)
+
+    assert digest == "Polished status digest"
+
+
+@patch("skills.monitor_skill.requests.post")
+@patch("skills.monitor_skill.Settings.load")
+def test_format_status_digest_fails_open_on_ollama_error(mock_settings_load, mock_post):
+    import requests
+
+    mock_settings_load.return_value = MagicMock(ollama_host="http://localhost:11434", ollama_model="llama3")
+    mock_post.side_effect = requests.RequestException("connection refused")
+    statuses = [build_position_status(POSITION, 2870.0)]
+
+    digest = format_status_digest(statuses)
+
+    assert "RELIANCE" in digest
+    assert "2870.00" in digest
 
 
 @patch("skills.notify_skill.route_message")
 @patch("skills.monitor_skill.monitor_all_positions")
 @patch("config.startup.StartupService")
 def test_main_sends_alerts_as_plain_text_not_markdown(mock_startup_cls, mock_monitor_all, mock_route_message):
-    mock_monitor_all.return_value = [
-        {"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "RELIANCE: price 2799 crossed stop_loss (2800.0)"}
-    ]
+    mock_monitor_all.return_value = (
+        [{"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "RELIANCE: price 2799 crossed stop_loss (2800.0)"}],
+        [],
+    )
 
     main()
 
@@ -188,12 +280,43 @@ def test_main_sends_alerts_as_plain_text_not_markdown(mock_startup_cls, mock_mon
 @patch("skills.monitor_skill.monitor_all_positions")
 @patch("config.startup.StartupService")
 def test_main_one_alert_delivery_failure_does_not_block_the_rest(mock_startup_cls, mock_monitor_all, mock_route_message):
-    mock_monitor_all.return_value = [
-        {"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "first alert"},
-        {"position_id": 2, "ticker": "TCS", "alert_type": "target", "message": "second alert"},
-    ]
+    mock_monitor_all.return_value = (
+        [
+            {"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "first alert"},
+            {"position_id": 2, "ticker": "TCS", "alert_type": "target", "message": "second alert"},
+        ],
+        [],
+    )
     mock_route_message.side_effect = [RuntimeError("telegram down"), None]
 
     main()  # must not raise
 
     assert mock_route_message.call_count == 2
+
+
+@patch("skills.monitor_skill.Settings.load")
+@patch("skills.notify_skill.route_message")
+@patch("skills.monitor_skill.monitor_all_positions")
+@patch("config.startup.StartupService")
+def test_main_sends_status_digest_discord_only(mock_startup_cls, mock_monitor_all, mock_route_message, mock_settings_load):
+    mock_settings_load.return_value = MagicMock(ollama_host="")
+    mock_monitor_all.return_value = ([], [build_position_status(POSITION, 2870.0)])
+
+    main()
+
+    mock_route_message.assert_called_once()
+    args, kwargs = mock_route_message.call_args
+    assert args[0] == "monitoring"
+    assert "RELIANCE" in args[1]
+    assert kwargs == {"send_telegram": False}
+
+
+@patch("skills.notify_skill.route_message")
+@patch("skills.monitor_skill.monitor_all_positions")
+@patch("config.startup.StartupService")
+def test_main_sends_no_status_digest_when_no_active_positions(mock_startup_cls, mock_monitor_all, mock_route_message):
+    mock_monitor_all.return_value = ([], [])
+
+    main()
+
+    mock_route_message.assert_not_called()
