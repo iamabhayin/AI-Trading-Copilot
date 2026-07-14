@@ -22,6 +22,7 @@ EXPECTED_COLUMNS = [
     "ema_50d",
     "BBU_20_2.0_2.0",
     "BBL_20_2.0_2.0",
+    "volume_ratio_20",
 ]
 
 REMOVED_COLUMNS = [
@@ -143,13 +144,33 @@ def test_bollinger_period_is_not_converted_for_timeframe(mock_bbands, sample_ohl
     assert mock_bbands.call_args.kwargs["length"] == 20
 
 
+def test_volume_ratio_is_one_for_flat_volume(sample_ohlcv):
+    flat_volume = sample_ohlcv.copy()
+    flat_volume["volume"] = 1000
+    out = compute_indicators(flat_volume, timeframe="1d")
+
+    ratio = out["volume_ratio_20"].dropna()
+    assert not ratio.empty
+    assert ratio.round(6).eq(1.0).all()
+
+
 def test_summarize_latest_returns_flat_dict(sample_ohlcv):
     out = compute_indicators(sample_ohlcv, timeframe="1d")
     summary = summarize_latest(out)
 
     assert summary["timeframe"] == "1d"
     assert isinstance(summary["close"], float)
-    assert set(summary) == {"timeframe", "close", "rsi_14", "ema_14d", "ema_50d", "bb_upper", "bb_lower"}
+    assert set(summary) == {
+        "timeframe",
+        "close",
+        "rsi_14",
+        "ema_14d",
+        "ema_50d",
+        "bb_upper",
+        "bb_lower",
+        "volume",
+        "volume_ratio_20",
+    }
 
 
 def test_summarize_recent_returns_n_rows_oldest_to_newest(sample_ohlcv):
@@ -157,7 +178,16 @@ def test_summarize_recent_returns_n_rows_oldest_to_newest(sample_ohlcv):
     recent = summarize_recent(out, n=10)
 
     assert len(recent) == 10
-    assert set(recent[0]) == {"timeframe", "close", "ema_14d", "ema_50d", "bb_upper", "bb_lower"}
+    assert set(recent[0]) == {
+        "timeframe",
+        "close",
+        "ema_14d",
+        "ema_50d",
+        "bb_upper",
+        "bb_lower",
+        "volume",
+        "volume_ratio_20",
+    }
     assert [row["close"] for row in recent] == out["close"].iloc[-10:].tolist()
     assert recent[-1]["timeframe"] == "1d"
 

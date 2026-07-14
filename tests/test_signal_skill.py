@@ -22,6 +22,7 @@ def test_system_prompt_names_expected_chart_patterns():
     assert "golden/death cross" in prompt_lower
     assert "squeeze" in prompt_lower
     assert "recent history" in prompt_lower or "history window" in prompt_lower
+    assert "volume_ratio_20" in prompt_lower
 
 
 def test_build_user_prompt_includes_recent_history():

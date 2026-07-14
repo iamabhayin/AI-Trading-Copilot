@@ -2,14 +2,16 @@
 
 Agent/Model: Code (pandas-ta). Deterministic, auditable — no LLM involved.
 
-Computes exactly three indicators from OHLCV candles: RSI, a 14-day/50-day
-EMA pair, and Bollinger Bands. Chart timeframe is configurable (e.g. `1h`,
-`1d`) and passed in as a parameter — same skill code, different interval, no
-separate skill needed. Default is `1h`, since this is a swing/positional
-system trading off hourly candles. "14-day"/"50-day" mean calendar trading
-days, not candle counts — `TRADING_HOURS_PER_DAY` converts between the two
-for the EMA pair. Outputs structured indicator values per ticker, tagged
-with the timeframe used.
+Computes four indicators from OHLCV candles: RSI, a 14-day/50-day EMA pair,
+Bollinger Bands, and a 20-period volume ratio (current volume vs. its own
+rolling average — a cheap, code-only confirmation signal, not a trading
+decision by itself). Chart timeframe is configurable (e.g. `1h`, `1d`) and
+passed in as a parameter — same skill code, different interval, no separate
+skill needed. Default is `1h`, since this is a swing/positional system
+trading off hourly candles. "14-day"/"50-day" mean calendar trading days,
+not candle counts — `TRADING_HOURS_PER_DAY` converts between the two for the
+EMA pair. Outputs structured indicator values per ticker, tagged with the
+timeframe used.
 """
 
 # TODO: Phase 1 — data fetch + indicator engine (plain Python, console output)
@@ -29,6 +31,8 @@ CANDLES_PER_TRADING_DAY = {"1h": TRADING_HOURS_PER_DAY, "1d": 1}
 EMA_FAST_DAYS = 14
 EMA_SLOW_DAYS = 50
 
+VOLUME_RATIO_PERIOD = 20
+
 
 def _period_for_days(days: int, timeframe: str) -> int:
     """Convert a calendar-day lookback into a candle-count period for `timeframe`."""
@@ -37,13 +41,14 @@ def _period_for_days(days: int, timeframe: str) -> int:
 
 
 def compute_indicators(df: pd.DataFrame, timeframe: str = "1h") -> pd.DataFrame:
-    """Append RSI, EMA(14-day)/EMA(50-day), and Bollinger Bands columns to
-    an OHLCV DataFrame.
+    """Append RSI, EMA(14-day)/EMA(50-day), Bollinger Bands, and a
+    20-period volume ratio column to an OHLCV DataFrame.
 
     `df` must have (case-insensitive) open/high/low/close/volume columns.
     The EMA periods are calendar-day based and converted to a candle count
-    for `timeframe` (e.g. ~88/~312 candles on `1h`). The returned DataFrame
-    is tagged with `timeframe` via `.attrs`.
+    for `timeframe` (e.g. ~88/~312 candles on `1h`). The volume ratio uses
+    a raw candle-count period like RSI/Bollinger, not a day-adjusted one.
+    The returned DataFrame is tagged with `timeframe` via `.attrs`.
     """
     missing = REQUIRED_COLUMNS - {c.lower() for c in df.columns}
     if missing:
@@ -59,6 +64,8 @@ def compute_indicators(df: pd.DataFrame, timeframe: str = "1h") -> pd.DataFrame:
 
     bbands = ta.bbands(out["close"], length=20)
     out = out.join(bbands)
+
+    out["volume_ratio_20"] = out["volume"] / out["volume"].rolling(window=VOLUME_RATIO_PERIOD).mean()
 
     out.attrs["timeframe"] = timeframe
     return out
@@ -77,6 +84,8 @@ def summarize_latest(df: pd.DataFrame) -> dict:
         "ema_50d": _safe_float(latest.get("ema_50d")),
         "bb_upper": _safe_float(latest.get("BBU_20_2.0_2.0")),
         "bb_lower": _safe_float(latest.get("BBL_20_2.0_2.0")),
+        "volume": _safe_float(latest.get("volume")),
+        "volume_ratio_20": _safe_float(latest.get("volume_ratio_20")),
     }
 
 
@@ -96,6 +105,8 @@ def summarize_recent(df: pd.DataFrame, n: int = 10) -> list[dict]:
             "ema_50d": _safe_float(row.get("ema_50d")),
             "bb_upper": _safe_float(row.get("BBU_20_2.0_2.0")),
             "bb_lower": _safe_float(row.get("BBL_20_2.0_2.0")),
+            "volume": _safe_float(row.get("volume")),
+            "volume_ratio_20": _safe_float(row.get("volume_ratio_20")),
         }
         for _, row in recent.iterrows()
     ]
