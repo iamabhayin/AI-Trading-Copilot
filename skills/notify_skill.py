@@ -35,6 +35,7 @@ from db.database import fetch_one
 # Discord and goes to Telegram only.
 DISCORD_CHANNEL_FIELD_BY_TYPE = {
     "market_news": "discord_channel_market_news",
+    "metals_price": "discord_channel_market_news",
     "signal": "discord_channel_signals",
     "monitoring": "discord_channel_monitoring",
     "chat": "discord_channel_chat",
@@ -135,16 +136,22 @@ async def send_discord_message(text: str, channel_id: str) -> None:
     await client.start(settings.discord_bot_token)
 
 
-def route_message(message_type: str, text: str, telegram_chat_id: str | None = None) -> None:
+def route_message(
+    message_type: str, text: str, telegram_chat_id: str | None = None, send_telegram: bool = True
+) -> None:
     """Send `text` to Telegram (the primary action channel, every message
-    type) and, if Discord is configured for `message_type`, also to the
-    matching Discord channel (the secondary organized reading surface).
+    type by default) and, if Discord is configured for `message_type`,
+    also to the matching Discord channel (the secondary organized reading
+    surface).
 
     The pipeline that produces a message calls this once; deciding where
     it goes lives here, not in the caller (Section 3.4) — a Discord send
     failure never blocks the Telegram send, since Telegram is primary.
+    `send_telegram=False` is for passive, non-actionable digests (e.g. the
+    metals price digest) that belong on the Discord reading surface only.
     """
-    asyncio.run(send_telegram_message(text, chat_id=telegram_chat_id))
+    if send_telegram:
+        asyncio.run(send_telegram_message(text, chat_id=telegram_chat_id))
 
     settings = Settings.load()
     channel_field = DISCORD_CHANNEL_FIELD_BY_TYPE.get(message_type)
