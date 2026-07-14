@@ -177,6 +177,10 @@ def test_notify_suggestion_formats_and_sends(mock_settings_load, mock_bot_cls):
     mock_bot_instance.send_message.assert_awaited_once()
     _, kwargs = mock_bot_instance.send_message.call_args
     assert "AAPL" in kwargs["text"]
+    # Plain text, not Markdown: Claude-authored rationale text reliably
+    # contains underscored field names that break Telegram's Markdown
+    # parser (found live) — see notify_suggestion's docstring.
+    assert kwargs["parse_mode"] is None
 
 
 @patch("skills.notify_skill.Settings.load")
