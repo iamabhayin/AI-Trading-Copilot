@@ -172,7 +172,10 @@ def monitor_all_positions() -> list[dict]:
     return all_alerts
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI/cron entry point: check every active position and deliver any
+    newly-fired alerts. This is what the scheduler invokes.
+    """
     from config.startup import StartupService
     from skills.notify_skill import route_message
 
@@ -185,6 +188,13 @@ if __name__ == "__main__":
     for alert in alerts:
         print(f"[{alert['alert_type']}] {alert['message']}")
         try:
-            route_message("monitoring", alert["message"])
-        except ValueError as exc:
-            print(f"  (not sent to Telegram: {exc})")
+            # Deterministic plain text (embeds field names like "stop_loss")
+            # is never meant to be parsed as Markdown — see
+            # send_telegram_message's docstring for why that matters here.
+            route_message("monitoring", alert["message"], telegram_parse_mode=None)
+        except Exception as exc:  # one alert's delivery failure must not block the rest
+            print(f"  (not sent: {exc})")
+
+
+if __name__ == "__main__":
+    main()

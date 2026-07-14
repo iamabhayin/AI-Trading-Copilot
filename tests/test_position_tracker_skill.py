@@ -124,6 +124,37 @@ def test_open_position_without_matching_suggestion(mock_fetch_one, mock_execute)
 
 @patch("skills.position_tracker_skill.execute")
 @patch("skills.position_tracker_skill.fetch_one")
+def test_open_position_only_matches_buy_suggestions(mock_fetch_one, mock_execute):
+    mock_fetch_one.return_value = {"id": 7, "stop_loss": 2800.0, "target": 3200.0}
+    mock_execute.return_value = 101
+
+    open_position({"ticker": "RELIANCE", "qty": 10.0, "price": 2950.0})
+
+    query, params = mock_fetch_one.call_args[0]
+    assert "action = 'BUY'" in query
+    assert params == ("RELIANCE",)
+
+
+@patch("skills.position_tracker_skill.execute")
+@patch("skills.position_tracker_skill.fetch_one")
+def test_open_position_drops_inverted_levels_from_stale_suggestion(mock_fetch_one, mock_execute):
+    # Found live: a SELL suggestion's stop_loss (above entry) and target
+    # (below entry) got attached to a real BUY position, which then made
+    # monitor_skill.py's long-only price-trigger check fire a false
+    # stop-loss alert almost immediately. Even a suggestion the query
+    # matched on (action='BUY') should still be sanity-checked.
+    mock_fetch_one.return_value = {"id": 9, "stop_loss": 1041.0, "target": 965.0}
+    mock_execute.return_value = 103
+
+    open_position({"ticker": "INDUSINDBK.NS", "qty": 1.0, "price": 1034.0})
+
+    args, _ = mock_execute.call_args
+    _, params = args
+    assert params == (None, "INDUSINDBK.NS", 1.0, 1034.0, None, None)
+
+
+@patch("skills.position_tracker_skill.execute")
+@patch("skills.position_tracker_skill.fetch_one")
 def test_close_position_updates_matching_active_position(mock_fetch_one, mock_execute):
     mock_fetch_one.return_value = {"id": 55}
 

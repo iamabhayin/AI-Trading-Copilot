@@ -89,8 +89,19 @@ def format_suggestion_message(suggestion: dict) -> str:
         return base_message  # fail open — better a plain message than none at all
 
 
-async def send_telegram_message(text: str, chat_id: str | None = None) -> None:
-    """Send `text` to the configured Telegram chat via the Bot API."""
+async def send_telegram_message(
+    text: str, chat_id: str | None = None, parse_mode: str | None = ParseMode.MARKDOWN
+) -> None:
+    """Send `text` to the configured Telegram chat via the Bot API.
+
+    `parse_mode` defaults to Markdown for hand-formatted messages (bold
+    tickers, etc.). Pass `None` for deterministic text that isn't meant to
+    contain markdown — e.g. monitor alerts, whose messages embed literal
+    field names like "stop_loss": a single underscore reads as an unclosed
+    italic entity to Telegram's Markdown parser and raises `BadRequest`,
+    silently killing delivery (found live — every stop-loss alert was
+    crashing before reaching Telegram).
+    """
     settings = Settings.load()
     if not settings.telegram_bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN must be set to send Telegram notifications")
@@ -100,7 +111,7 @@ async def send_telegram_message(text: str, chat_id: str | None = None) -> None:
         raise ValueError("TELEGRAM_CHAT_ID must be set to send Telegram notifications")
 
     bot = Bot(token=settings.telegram_bot_token)
-    await bot.send_message(chat_id=target_chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    await bot.send_message(chat_id=target_chat_id, text=text, parse_mode=parse_mode)
 
 
 class _OneShotDiscordClient(discord.Client):
@@ -137,7 +148,11 @@ async def send_discord_message(text: str, channel_id: str) -> None:
 
 
 def route_message(
-    message_type: str, text: str, telegram_chat_id: str | None = None, send_telegram: bool = True
+    message_type: str,
+    text: str,
+    telegram_chat_id: str | None = None,
+    send_telegram: bool = True,
+    telegram_parse_mode: str | None = ParseMode.MARKDOWN,
 ) -> None:
     """Send `text` to Telegram (the primary action channel, every message
     type by default) and, if Discord is configured for `message_type`,
@@ -149,9 +164,11 @@ def route_message(
     failure never blocks the Telegram send, since Telegram is primary.
     `send_telegram=False` is for passive, non-actionable digests (e.g. the
     metals price digest) that belong on the Discord reading surface only.
+    `telegram_parse_mode=None` is for deterministic plain-text messages
+    that aren't meant to contain markdown (see `send_telegram_message`).
     """
     if send_telegram:
-        asyncio.run(send_telegram_message(text, chat_id=telegram_chat_id))
+        asyncio.run(send_telegram_message(text, chat_id=telegram_chat_id, parse_mode=telegram_parse_mode))
 
     settings = Settings.load()
     channel_field = DISCORD_CHANNEL_FIELD_BY_TYPE.get(message_type)
