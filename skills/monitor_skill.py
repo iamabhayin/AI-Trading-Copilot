@@ -16,6 +16,11 @@ post-market runs — not tight intraday polling):
 2. A Claude risk-judgment call per position using fresh relevant news,
    for early-exit or stop-loss-adjustment judgment calls beyond a plain
    price cross — genuine reasoning, never downgraded to Ollama.
+3. An always-on status digest (current price, % distance to stop-loss
+   and target) for every active position, regardless of whether either
+   check above fired — pure arithmetic, with Ollama used only for
+   phrasing polish (never the numbers), same split as the other digest
+   skills. Sent to Discord #monitoring only, not Telegram.
 
 Both alert types are deduplicated via the `alerts_sent` table so the same
 trigger doesn't spam repeatedly across successive monitor runs.
@@ -30,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import anthropic
+import requests
 
 from config.settings import Settings
 from db.database import execute, fetch_all, fetch_one
@@ -155,21 +161,100 @@ def monitor_position(position: dict, current_price: float, news: list[dict]) -> 
     return alerts
 
 
-def monitor_all_positions() -> list[dict]:
+def build_position_status(position: dict, current_price: float) -> dict:
+    """Compute current price and % distance to stop-loss/target for a
+    single active position — pure arithmetic, no LLM. Distance is null
+    where the corresponding level isn't set (a position can have neither,
+    e.g. after the linkage fix drops a mismatched suggestion).
+    """
+    status = {
+        "ticker": position["ticker"],
+        "current_price": current_price,
+        "entry_price": position["entry_price"],
+        "stop_loss": position["stop_loss"],
+        "target": position["target"],
+        "distance_to_stop_loss_pct": None,
+        "distance_to_target_pct": None,
+    }
+    if position["stop_loss"] is not None:
+        status["distance_to_stop_loss_pct"] = (current_price - position["stop_loss"]) / current_price * 100
+    if position["target"] is not None:
+        status["distance_to_target_pct"] = (position["target"] - current_price) / current_price * 100
+    return status
+
+
+def monitor_all_positions() -> tuple[list[dict], list[dict]]:
     """Fetch every active position, run both checks against fresh price/
-    news data, and return every newly-fired alert across the watchlist.
+    news data, and return `(alerts, statuses)`: every newly-fired alert
+    across the watchlist, and a plain price/distance-to-SL-target status
+    for every active position regardless of whether it triggered an alert
+    (powers the always-on status digest). One position's fetch failure
+    (e.g. a delisted ticker) must not block the rest — same isolation
+    standard as the Signal Skill's per-ticker loop.
     """
     from skills.data_fetch_skill import fetch_news, fetch_ohlcv, filter_news_relevance
 
     all_alerts = []
+    all_statuses = []
     for row in fetch_all("SELECT * FROM positions WHERE status = 'active'"):
         position = dict(row)
-        ohlcv = fetch_ohlcv(position["ticker"], timeframe="1d", period="5d")
-        current_price = float(ohlcv["close"].iloc[-1])
-        news = filter_news_relevance(position["ticker"], fetch_news(position["ticker"]))
+        try:
+            ohlcv = fetch_ohlcv(position["ticker"], timeframe="1d", period="5d")
+            current_price = float(ohlcv["close"].iloc[-1])
+            news = filter_news_relevance(position["ticker"], fetch_news(position["ticker"]))
+        except Exception as exc:  # one bad/delisted ticker must not block the rest of the check
+            print(f"  skipping {position['ticker']}: {exc}")
+            continue
         all_alerts.extend(monitor_position(position, current_price, news))
+        all_statuses.append(build_position_status(position, current_price))
 
-    return all_alerts
+    return all_alerts, all_statuses
+
+
+def _template_status_digest(statuses: list[dict]) -> str:
+    """Deterministic fallback formatting — no LLM involved."""
+    if not statuses:
+        return "*Position Status*\nNo active positions."
+
+    lines = ["*Position Status*"]
+    for s in statuses:
+        line = f"{s['ticker']}: {s['current_price']:.2f}"
+        if s["distance_to_stop_loss_pct"] is not None:
+            line += f" | SL {s['stop_loss']:.2f} ({s['distance_to_stop_loss_pct']:+.1f}%)"
+        if s["distance_to_target_pct"] is not None:
+            line += f" | Target {s['target']:.2f} ({s['distance_to_target_pct']:+.1f}%)"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_status_digest(statuses: list[dict]) -> str:
+    """Turn per-position status data into a digest message. Uses Ollama
+    for phrasing polish only — the numbers are plain arithmetic computed
+    in `build_position_status`, never touched by an LLM. Falls back to a
+    deterministic template if OLLAMA_HOST isn't configured or unreachable.
+    """
+    settings = Settings.load()
+    base_message = _template_status_digest(statuses)
+    if not settings.ollama_host:
+        return base_message
+
+    prompt = (
+        "Rewrite the following position status digest as a short, clear "
+        "Discord message. Keep every number exactly as given, keep the "
+        "Markdown bold heading, and do not add any information that "
+        "isn't already present.\n\n" + base_message
+    )
+    try:
+        resp = requests.post(
+            f"{settings.ollama_host}/api/generate",
+            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        polished = resp.json().get("response", "").strip()
+        return polished or base_message
+    except requests.RequestException:
+        return base_message  # fail open — better a plain message than none at all
 
 
 def main() -> None:
@@ -181,7 +266,7 @@ def main() -> None:
 
     StartupService().start()
 
-    alerts = monitor_all_positions()
+    alerts, statuses = monitor_all_positions()
     if not alerts:
         print("No active positions triggered an alert.")
 
@@ -194,6 +279,17 @@ def main() -> None:
             route_message("monitoring", alert["message"], telegram_parse_mode=None)
         except Exception as exc:  # one alert's delivery failure must not block the rest
             print(f"  (not sent: {exc})")
+
+    if statuses:
+        digest = format_status_digest(statuses)
+        print(digest)
+        try:
+            # Status digest is Discord #monitoring only, not Telegram —
+            # informational check-in, not an actionable trade alert, same
+            # split as the metals/news digests.
+            route_message("monitoring", digest, send_telegram=False)
+        except Exception as exc:
+            print(f"  (status digest not sent: {exc})")
 
 
 if __name__ == "__main__":
