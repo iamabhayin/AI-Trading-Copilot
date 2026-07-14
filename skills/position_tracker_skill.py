@@ -103,17 +103,32 @@ def parse_trade(message: str) -> dict | None:
 
 
 def open_position(trade: dict) -> int:
-    """Record a new active position, linking it to the most recent
+    """Record a new active position, linking it to the most recent BUY
     suggestion for that ticker (for stop_loss/target) if one exists.
     Returns the new position id.
+
+    Only a BUY suggestion is eligible — the Signal Skill runs constantly
+    and produces BUY/SELL/HOLD calls for the same ticker throughout the
+    day, and every position opened here is a long (a "sell" reply only
+    ever closes an existing position, see `handle_reply`). Matching on
+    "most recent suggestion" regardless of action previously let a SELL
+    call's inverted levels (stop_loss above entry, target below) attach
+    to a real BUY position, which then made the long-only price-trigger
+    check in monitor_skill.py fire a false stop-loss alert almost
+    immediately (found live, 2026-07-07). The stop_loss < price < target
+    check below is a second, independent guard against attaching
+    nonsensical levels even from a same-direction suggestion.
     """
     suggestion = fetch_one(
-        "SELECT id, stop_loss, target FROM suggestions WHERE ticker = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, stop_loss, target FROM suggestions WHERE ticker = ? AND action = 'BUY' ORDER BY created_at DESC LIMIT 1",
         (trade["ticker"],),
     )
     suggestion_id = suggestion["id"] if suggestion else None
     stop_loss = suggestion["stop_loss"] if suggestion else None
     target = suggestion["target"] if suggestion else None
+
+    if stop_loss is not None and target is not None and not (stop_loss < trade["price"] < target):
+        suggestion_id, stop_loss, target = None, None, None
 
     return execute(
         """

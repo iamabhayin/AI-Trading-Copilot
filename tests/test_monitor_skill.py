@@ -13,6 +13,7 @@ from skills.monitor_skill import (
     already_alerted,
     check_price_trigger,
     evaluate_risk_judgment,
+    main,
     monitor_all_positions,
     monitor_position,
     record_alert,
@@ -166,3 +167,33 @@ def test_monitor_all_positions_iterates_active_positions(mock_fetch_all, mock_mo
     mock_monitor_position.assert_called_once()
     fetch_all_query = mock_fetch_all.call_args[0][0]
     assert "status = 'active'" in fetch_all_query
+
+
+@patch("skills.notify_skill.route_message")
+@patch("skills.monitor_skill.monitor_all_positions")
+@patch("config.startup.StartupService")
+def test_main_sends_alerts_as_plain_text_not_markdown(mock_startup_cls, mock_monitor_all, mock_route_message):
+    mock_monitor_all.return_value = [
+        {"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "RELIANCE: price 2799 crossed stop_loss (2800.0)"}
+    ]
+
+    main()
+
+    mock_route_message.assert_called_once_with(
+        "monitoring", "RELIANCE: price 2799 crossed stop_loss (2800.0)", telegram_parse_mode=None
+    )
+
+
+@patch("skills.notify_skill.route_message")
+@patch("skills.monitor_skill.monitor_all_positions")
+@patch("config.startup.StartupService")
+def test_main_one_alert_delivery_failure_does_not_block_the_rest(mock_startup_cls, mock_monitor_all, mock_route_message):
+    mock_monitor_all.return_value = [
+        {"position_id": 1, "ticker": "RELIANCE", "alert_type": "stop_loss", "message": "first alert"},
+        {"position_id": 2, "ticker": "TCS", "alert_type": "target", "message": "second alert"},
+    ]
+    mock_route_message.side_effect = [RuntimeError("telegram down"), None]
+
+    main()  # must not raise
+
+    assert mock_route_message.call_count == 2

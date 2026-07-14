@@ -8,6 +8,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telegram.constants import ParseMode
 
 from skills.notify_skill import (
     _template_message,
@@ -135,6 +136,34 @@ def test_send_telegram_message_uses_explicit_chat_id_override(mock_settings_load
 
 @patch("skills.notify_skill.Bot")
 @patch("skills.notify_skill.Settings.load")
+def test_send_telegram_message_defaults_to_markdown(mock_settings_load, mock_bot_cls):
+    mock_settings_load.return_value = MagicMock(telegram_bot_token="fake-token", telegram_chat_id="12345")
+    mock_bot_instance = MagicMock()
+    mock_bot_instance.send_message = AsyncMock()
+    mock_bot_cls.return_value = mock_bot_instance
+
+    asyncio.run(send_telegram_message("hello"))
+
+    _, kwargs = mock_bot_instance.send_message.call_args
+    assert kwargs["parse_mode"] == ParseMode.MARKDOWN
+
+
+@patch("skills.notify_skill.Bot")
+@patch("skills.notify_skill.Settings.load")
+def test_send_telegram_message_honors_parse_mode_override(mock_settings_load, mock_bot_cls):
+    mock_settings_load.return_value = MagicMock(telegram_bot_token="fake-token", telegram_chat_id="12345")
+    mock_bot_instance = MagicMock()
+    mock_bot_instance.send_message = AsyncMock()
+    mock_bot_cls.return_value = mock_bot_instance
+
+    asyncio.run(send_telegram_message("stop_loss crossed", parse_mode=None))
+
+    _, kwargs = mock_bot_instance.send_message.call_args
+    assert kwargs["parse_mode"] is None
+
+
+@patch("skills.notify_skill.Bot")
+@patch("skills.notify_skill.Settings.load")
 def test_notify_suggestion_formats_and_sends(mock_settings_load, mock_bot_cls):
     mock_settings_load.return_value = MagicMock(
         telegram_bot_token="fake-token", telegram_chat_id="12345", ollama_host="", discord_bot_token=""
@@ -203,6 +232,23 @@ def test_route_message_sends_telegram_only_when_discord_unconfigured(mock_settin
 
     mock_bot_instance.send_message.assert_awaited_once()
     mock_send_discord.assert_not_called()
+    _, kwargs = mock_bot_instance.send_message.call_args
+    assert kwargs["parse_mode"] == ParseMode.MARKDOWN
+
+
+@patch("skills.notify_skill.send_discord_message", new_callable=AsyncMock)
+@patch("skills.notify_skill.Bot")
+@patch("skills.notify_skill.Settings.load")
+def test_route_message_honors_telegram_parse_mode_override(mock_settings_load, mock_bot_cls, mock_send_discord):
+    mock_settings_load.return_value = _mock_settings_with_discord()
+    mock_bot_instance = MagicMock()
+    mock_bot_instance.send_message = AsyncMock()
+    mock_bot_cls.return_value = mock_bot_instance
+
+    route_message("monitoring", "RELIANCE: price 2799 crossed stop_loss (2800.0)", telegram_parse_mode=None)
+
+    _, kwargs = mock_bot_instance.send_message.call_args
+    assert kwargs["parse_mode"] is None
 
 
 @patch("skills.notify_skill.send_discord_message", new_callable=AsyncMock)
