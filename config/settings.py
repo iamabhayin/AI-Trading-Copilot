@@ -63,6 +63,12 @@ class Config(BaseModel):
     default_timeframe: str = "1d"
     watchlist: list[str] = Field(default_factory=list)
 
+    # Phase 14 Task 4: gated risk-regime bias for Signal Skill shortlist
+    # ranking (see skills/signal_skill.py). A strategy-logic change, not
+    # just added context, so it defaults to False and must be explicitly
+    # enabled — never flip this default in code, only via env var.
+    enable_risk_regime_bias: bool = False
+
     @classmethod
     def load(cls) -> "Config":
         """Load settings from the process environment, reading .env first.
@@ -76,6 +82,11 @@ class Config(BaseModel):
     def _split_watchlist(raw: str) -> list[str]:
         """Turn a comma-separated WATCHLIST env var into a clean list of tickers."""
         return [ticker.strip() for ticker in raw.split(",") if ticker.strip()]
+
+    @staticmethod
+    def _parse_bool(raw: str) -> bool:
+        """Turn a truthy env var string ("1"/"true"/"yes", any case) into a bool."""
+        return raw.strip().lower() in ("1", "true", "yes")
 
 
 class ConfigLoader:
@@ -120,6 +131,7 @@ class ConfigLoader:
                 log_level=os.getenv("LOG_LEVEL", "INFO"),
                 default_timeframe=os.getenv("DEFAULT_TIMEFRAME", "1d"),
                 watchlist=Config._split_watchlist(os.getenv("WATCHLIST", "")),
+                enable_risk_regime_bias=Config._parse_bool(os.getenv("ENABLE_RISK_REGIME_BIAS", "false")),
             )
         except ValidationError as exc:
             raise ConfigError(f"Invalid configuration: {exc}") from exc

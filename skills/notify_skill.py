@@ -36,6 +36,7 @@ from db.database import fetch_one
 DISCORD_CHANNEL_FIELD_BY_TYPE = {
     "market_news": "discord_channel_market_news",
     "metals_price": "discord_channel_market_news",
+    "global_cues": "discord_channel_market_news",
     "signal": "discord_channel_signals",
     "monitoring": "discord_channel_monitoring",
     "chat": "discord_channel_chat",
@@ -44,10 +45,11 @@ DISCORD_CHANNEL_FIELD_BY_TYPE = {
 
 
 def _template_message(suggestion: dict) -> str:
-    """Deterministic fallback formatting — no LLM involved."""
+    """Deterministic fallback formatting — no LLM involved. Plain text,
+    not Markdown (see notify_suggestion's docstring for why)."""
     ticker = suggestion["ticker"]
     action = suggestion["action"]
-    lines = [f"*{ticker}* — {action}"]
+    lines = [f"{ticker} — {action}"]
     if action in ("BUY", "SELL"):
         lines.append(f"Entry: {suggestion.get('entry')}")
         lines.append(f"Stop-loss: {suggestion.get('stop_loss')}")
@@ -72,9 +74,9 @@ def format_suggestion_message(suggestion: dict) -> str:
 
     prompt = (
         "Rewrite the following trade suggestion as a short, clear Telegram "
-        "message. Keep every number exactly as given, keep the Markdown "
-        "bold ticker, and do not add any information that isn't already "
-        "present.\n\n" + base_message
+        "message. Keep every number exactly as given, do not use Markdown "
+        "formatting (this is sent as plain text), and do not add any "
+        "information that isn't already present.\n\n" + base_message
     )
     try:
         resp = requests.post(
@@ -187,8 +189,17 @@ def notify_suggestion(suggestion: dict) -> None:
     #signals Discord channel if configured. The synchronous entry point
     used by plain-Python callers (Signal Skill console script, later the
     OpenClaw scheduler).
+
+    Sent as plain text (telegram_parse_mode=None), not Markdown: the
+    rationale is Claude-authored free text that reliably mentions
+    underscored field names (ema_14d, rsi_14, bb_lower, volume_ratio_20,
+    ...) an unpredictable number of times per message, which intermittently
+    breaks Telegram's Markdown parser (found live — the same root cause
+    already fixed for monitor_skill.py's alerts, see send_telegram_message's
+    docstring). Losing the bold ticker is worth never silently dropping a
+    real BUY/SELL notification again.
     """
-    route_message("signal", format_suggestion_message(suggestion))
+    route_message("signal", format_suggestion_message(suggestion), telegram_parse_mode=None)
 
 
 def build_market_news_digest(watchlist: list[str]) -> str:

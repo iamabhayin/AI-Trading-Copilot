@@ -63,7 +63,17 @@ SYSTEM_PROMPT = (
     "setup as stronger when volume_ratio_20 is meaningfully above 1 (the "
     "move is backed by real participation) and treat it with more caution "
     "when volume is thin, well below 1 (the move may not hold). Don't "
-    "block a BUY/SELL on volume alone if the rest of the evidence is solid."
+    "block a BUY/SELL on volume alone if the rest of the evidence is solid. "
+    "You are also given an 'Overnight Global Cues' snapshot — S&P 500, "
+    "Nasdaq, and crude oil % change, the VIX level, and USD/INR % change "
+    "from the prior US/FX session (a cue may be missing if its fetch "
+    "failed; treat that as no signal, not a red flag). This is "
+    "market-wide context, not a per-ticker signal — weigh it into your "
+    "synthesis the same way you already weigh news headlines. Use "
+    "judgment about whether the overnight backdrop supports or "
+    "complicates the ticker-specific setup; never apply a fixed rule to "
+    "it (e.g. do not treat 'VIX above some level' as an automatic "
+    "confidence downgrade)."
 )
 
 SUGGESTION_SCHEMA = {
@@ -80,31 +90,88 @@ SUGGESTION_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Task 4 (gated behind Settings.enable_risk_regime_bias, default False —
+# see config/settings.py): same contract plus a coarse regime
+# classification, requested as part of the same synthesis call so
+# enabling this adds no extra API call, only a bit of output on the runs
+# it's active for. SUGGESTION_SCHEMA itself is untouched by design, so
+# the default (flag off) path is byte-identical to before this task.
+RISK_REGIME_FIELD = {"risk_regime": {"type": "string", "enum": ["risk_on", "risk_off", "neutral"]}}
 
-def _build_user_prompt(ticker: str, indicators: dict, news: list[dict], recent: list[dict]) -> str:
+SUGGESTION_SCHEMA_WITH_REGIME = {
+    "type": "object",
+    "properties": {**SUGGESTION_SCHEMA["properties"], **RISK_REGIME_FIELD},
+    "required": [*SUGGESTION_SCHEMA["required"], "risk_regime"],
+    "additionalProperties": False,
+}
+
+RISK_REGIME_PROMPT_ADDENDUM = (
+    " Additionally, classify the overnight global cues you were given "
+    "into a coarse risk_regime: 'risk_on' if the overnight backdrop "
+    "broadly favors risk assets (equities up, VIX low/falling, no "
+    "alarming move in crude or the rupee), 'risk_off' if it broadly "
+    "discourages risk-taking (equities down, VIX elevated/rising, a "
+    "sharp adverse move in crude or the rupee), or 'neutral' if the "
+    "signals are mixed or unremarkable. This classification is separate "
+    "from, and must not override, your BUY/SELL/HOLD action for this "
+    "specific ticker — it only feeds into how suggestions get ranked "
+    "against each other afterward, never the decision itself."
+)
+
+# Mild ranking nudge only, never a filter and never applied to the
+# action Claude chose. Absent for any (regime, action) pair not listed
+# here — including when risk_regime is None (flag off, or missing from
+# an older/HOLD-only suggestion), so the default path is unaffected.
+REGIME_RANKING_BOOST = {
+    ("risk_on", "BUY"): 1.1,
+    ("risk_off", "SELL"): 1.1,
+}
+
+
+def _build_user_prompt(
+    ticker: str, indicators: dict, news: list[dict], recent: list[dict], global_cues: dict
+) -> str:
     relevant_headlines = [item["headline"] for item in news if item.get("relevant")]
     return (
         f"Ticker: {ticker}\n"
         f"Indicators: {json.dumps(indicators, sort_keys=True)}\n"
         f"Recent history (oldest to newest): {json.dumps(recent)}\n"
+        f"Overnight Global Cues: {json.dumps(global_cues, sort_keys=True)}\n"
         f"Relevant recent headlines: {json.dumps(relevant_headlines)}"
     )
 
 
-def generate_suggestion(ticker: str, indicators: dict, news: list[dict], recent: list[dict]) -> dict:
-    """Call Claude with indicator + news context and return a validated,
-    structured suggestion: {ticker, action, entry, stop_loss, target,
-    confidence, rationale}.
+def generate_suggestion(
+    ticker: str,
+    indicators: dict,
+    news: list[dict],
+    recent: list[dict],
+    global_cues: dict,
+    include_risk_regime: bool = False,
+) -> dict:
+    """Call Claude with indicator + news + overnight global-cues context
+    and return a validated, structured suggestion: {ticker, action,
+    entry, stop_loss, target, confidence, rationale}.
+
+    `include_risk_regime=False` (the default) is byte-identical to this
+    skill's behavior before Task 4 — same system prompt, same schema,
+    same one JSON schema call. Only when both `Settings.enable_risk_regime_bias`
+    and the `--regime-check` CLI flag are set (see `main`) does the
+    caller pass `True`, which swaps in the regime-augmented prompt/schema
+    for this same call — no extra API call either way.
     """
     settings = Settings.load()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
+    system_prompt = SYSTEM_PROMPT + RISK_REGIME_PROMPT_ADDENDUM if include_risk_regime else SYSTEM_PROMPT
+    schema = SUGGESTION_SCHEMA_WITH_REGIME if include_risk_regime else SUGGESTION_SCHEMA
+
     response = client.messages.create(
         model=MODEL,
         max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        output_config={"format": {"type": "json_schema", "schema": SUGGESTION_SCHEMA}},
-        messages=[{"role": "user", "content": _build_user_prompt(ticker, indicators, news, recent)}],
+        system=system_prompt,
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": _build_user_prompt(ticker, indicators, news, recent, global_cues)}],
     )
 
     if response.stop_reason == "refusal":
@@ -136,27 +203,60 @@ def save_suggestion(suggestion: dict, timeframe: str) -> int:
     )
 
 
+def _ranking_confidence(suggestion: dict) -> float:
+    """Confidence used for shortlist ranking only — never changes the
+    action Claude chose, never filters a suggestion out. When a
+    suggestion carries a `risk_regime` tag (Task 4, gated behind
+    `Settings.enable_risk_regime_bias`), a mild multiplier nudges ranking
+    order when the action aligns with the regime; when `risk_regime` is
+    absent (the default — flag off, or a HOLD/older suggestion), this is
+    identical to the raw confidence score.
+    """
+    confidence = suggestion.get("confidence") or 0
+    multiplier = REGIME_RANKING_BOOST.get((suggestion.get("risk_regime"), suggestion.get("action")), 1.0)
+    return confidence * multiplier
+
+
 def shortlist(suggestions: list[dict], limit: int = 5) -> list[dict]:
-    """Rank non-HOLD suggestions by confidence and return the top `limit` —
-    the "prominent stocks" shortlist referenced in Section 3.3.
+    """Rank non-HOLD suggestions by confidence (adjusted for risk-regime
+    alignment when present — see `_ranking_confidence`) and return the
+    top `limit` — the "prominent stocks" shortlist referenced in
+    Section 3.3.
     """
     actionable = [s for s in suggestions if s["action"] in ("BUY", "SELL")]
-    return sorted(actionable, key=lambda s: s.get("confidence") or 0, reverse=True)[:limit]
+    return sorted(actionable, key=_ranking_confidence, reverse=True)[:limit]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI/cron entry point: the full pipeline for the whole watchlist —
     data fetch -> indicators -> signal generation -> save -> notify the
     shortlisted (non-HOLD) suggestions. This is what the scheduler invokes.
     """
     from config.startup import StartupService
     from skills.data_fetch_skill import fetch_ticker_snapshot
+    from skills.global_cues_skill import fetch_global_cues
     from skills.indicator_engine import compute_indicators, summarize_latest, summarize_recent
     from skills.notify_skill import notify_suggestion
 
+    args = argv if argv is not None else sys.argv[1:]
     settings = StartupService().start()
     watchlist = settings.watchlist or ["AAPL"]
     timeframe = settings.default_timeframe or "1h"
+
+    # Same overnight snapshot for the whole watchlist, so fetch once per
+    # run rather than per ticker. fetch_global_cues() never raises (each
+    # of its 5 tickers is isolated internally) -- worst case this is {},
+    # and the suggestion prompt just shows no overnight context.
+    global_cues = fetch_global_cues()
+
+    # Task 4: risk-regime classification. Both the config flag AND this
+    # CLI flag must be set -- neither is flipped on by this code. The
+    # --regime-check flag is how a specific cron job invocation (meant to
+    # be pre_market_run only, once/day) opts in; the config flag is the
+    # separate "do I want this feature at all" switch. Leaving either off
+    # keeps every generate_suggestion() call byte-identical to before
+    # Task 4 -- zero cost/behavior change until both are explicitly set.
+    include_risk_regime = settings.enable_risk_regime_bias and "--regime-check" in args
 
     suggestions = []
     for ticker in watchlist:
@@ -166,7 +266,9 @@ def main() -> None:
             computed = compute_indicators(snapshot["ohlcv"], timeframe)
             indicators = summarize_latest(computed)
             recent = summarize_recent(computed)
-            suggestion = generate_suggestion(ticker, indicators, snapshot["news"], recent)
+            suggestion = generate_suggestion(
+                ticker, indicators, snapshot["news"], recent, global_cues, include_risk_regime
+            )
         except Exception as exc:  # one bad/delisted ticker must not block the rest of the watchlist
             print(f"  skipping {ticker}: {exc}")
             continue
@@ -177,7 +279,10 @@ def main() -> None:
     print("\n--- Shortlist ---")
     for suggestion in shortlist(suggestions):
         print(f"{suggestion['ticker']}: {suggestion['action']} (confidence={suggestion['confidence']})")
-        notify_suggestion(suggestion)
+        try:
+            notify_suggestion(suggestion)
+        except Exception as exc:  # one suggestion's delivery failure must not block the rest
+            print(f"  (not sent: {exc})")
 
 
 if __name__ == "__main__":
