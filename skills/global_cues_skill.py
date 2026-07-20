@@ -184,7 +184,8 @@ def generate_market_sentiment(cues: dict, headlines: list[dict]) -> str | None:
         resp.raise_for_status()
         text = resp.json().get("response", "").strip()
         return text or None
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        print(f"  market sentiment generation failed: {exc}")
         return None
 
 
