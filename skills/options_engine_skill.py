@@ -611,6 +611,68 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
 
 
 # --------------------------------------------------------------------------
+# Session start / end heartbeat
+# --------------------------------------------------------------------------
+#
+# Deliberately does NOT depend on Angel One/live data -- the whole point is
+# to be a heartbeat that proves the cron infrastructure itself is alive,
+# independent of whether the data source is having problems (that's
+# already its own #monitoring alert path via fetch_cycle_data's error
+# handling). Discord-only (send_telegram=False), matching this project's
+# existing convention for passive, non-actionable digests.
+
+
+def format_session_start_message(today: date) -> str:
+    return "\n".join(
+        [
+            "NIFTY Options Engine -- SESSION START",
+            f"Date: {today.isoformat()}",
+            "Market hours: 09:15-15:30 IST",
+            "Engine cron is alive and beginning today's cycles.",
+        ]
+    )
+
+
+def notify_session_start(config: OptionsConfig, today: date | None = None) -> None:
+    text = format_session_start_message(today or datetime.now(IST).date())
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
+
+
+def format_session_end_message(today: date) -> dict:
+    advisory_rows = fetch_all(
+        "SELECT action, COUNT(*) AS cnt FROM options_advisories WHERE created_ts LIKE ? GROUP BY action",
+        (f"{today.isoformat()}%",),
+    )
+    advisory_counts = {row["action"]: row["cnt"] for row in advisory_rows}
+    opened_today = fetch_one("SELECT COUNT(*) AS cnt FROM options_positions WHERE date(opened_ts) = date('now')")["cnt"]
+    closed_today = fetch_one(
+        "SELECT COUNT(*) AS cnt FROM options_positions WHERE status = 'closed' AND date(closed_ts) = date('now')"
+    )["cnt"]
+    still_active = fetch_one("SELECT COUNT(*) AS cnt FROM options_positions WHERE status = 'active'")["cnt"]
+    engine_state = get_engine_state()
+
+    lines = [
+        "NIFTY Options Engine -- SESSION END",
+        f"Date: {today.isoformat()}",
+        f"Advisories today: {sum(advisory_counts.values())} "
+        f"(BUY_CE {advisory_counts.get('BUY_CE_CANDIDATE', 0)}, "
+        f"BUY_PE {advisory_counts.get('BUY_PE_CANDIDATE', 0)}, "
+        f"NO_TRADE {advisory_counts.get('NO_TRADE', 0)}, "
+        f"WAIT {advisory_counts.get('WAIT', 0)})",
+        f"Positions opened today: {opened_today}",
+        f"Positions closed today: {closed_today}",
+        f"Still active: {still_active}",
+        f"Engine mode at close: {engine_state.get('mode')}",
+    ]
+    return {"text": "\n".join(lines), "advisory_counts": advisory_counts}
+
+
+def notify_session_end(config: OptionsConfig, today: date | None = None) -> None:
+    formatted = format_session_end_message(today or datetime.now(IST).date())
+    route_message("option_trading", formatted["text"], send_telegram=False, telegram_parse_mode=None)
+
+
+# --------------------------------------------------------------------------
 # End of day
 # --------------------------------------------------------------------------
 
@@ -638,6 +700,16 @@ def main(argv: list[str] | None = None) -> None:
     args = argv if argv is not None else sys.argv[1:]
     StartupService().start()
     config = OptionsConfig.load()
+
+    if "--session-start" in args:
+        notify_session_start(config)
+        print("Session-start notification sent")
+        return
+
+    if "--session-end" in args:
+        notify_session_end(config)
+        print("Session-end notification sent")
+        return
 
     if "--eod" in args:
         result = run_end_of_day(config)

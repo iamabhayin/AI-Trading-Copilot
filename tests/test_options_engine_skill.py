@@ -26,11 +26,15 @@ from skills.options_engine_skill import (
     fetch_first_of_day_snapshot,
     fetch_prior_day_last_snapshot,
     format_false_breakout_message,
+    format_session_end_message,
+    format_session_start_message,
     format_watch_escalation_message,
     get_engine_state,
     get_greeks_sanity_checked_date,
     is_market_hours,
     mark_greeks_sanity_checked,
+    notify_session_end,
+    notify_session_start,
     release_lock,
     run_cycle,
     run_end_of_day,
@@ -563,6 +567,65 @@ def test_run_cycle_false_breakout_notifies_and_deescalates(real_db, tmp_path):
 
     state = get_engine_state()
     assert state["mode"] == "NORMAL"
+
+
+# --------------------------------------------------------------------------
+# Session start / end heartbeat
+# --------------------------------------------------------------------------
+
+
+def test_format_session_start_message():
+    text = format_session_start_message(date(2026, 7, 21))
+    assert "SESSION START" in text
+    assert "2026-07-21" in text
+    assert "09:15-15:30 IST" in text
+
+
+def test_notify_session_start_routes_discord_only():
+    config = _config()
+    with patch("skills.options_engine_skill.route_message") as mock_route:
+        notify_session_start(config, today=date(2026, 7, 21))
+
+    mock_route.assert_called_once()
+    assert mock_route.call_args[0][0] == "option_trading"
+    assert mock_route.call_args.kwargs["send_telegram"] is False
+
+
+def test_format_session_end_message_counts_todays_activity(real_db):
+    from db.database import execute
+
+    today = date(2026, 7, 21)
+    execute(
+        "INSERT INTO options_advisories (created_ts, action, payload_json, score) VALUES (?,?,?,?)",
+        (f"{today.isoformat()}T10:00:00+05:30", "BUY_CE_CANDIDATE", "{}", 80),
+    )
+    execute(
+        "INSERT INTO options_advisories (created_ts, action, payload_json, score) VALUES (?,?,?,?)",
+        (f"{today.isoformat()}T11:00:00+05:30", "NO_TRADE", "{}", 40),
+    )
+    execute(
+        """INSERT INTO options_positions
+           (status, contract, expiry_date, strike, side, qty_lots, lot_size, entry_premium, thesis_json, opened_ts)
+           VALUES ('active', 'NIFTY 25200 CE 24 July', '24JUL2025', 25200.0, 'CE', 1, 75, 100.0, '{}', datetime('now'))"""
+    )
+
+    result = format_session_end_message(today)
+
+    assert "SESSION END" in result["text"]
+    assert result["advisory_counts"]["BUY_CE_CANDIDATE"] == 1
+    assert result["advisory_counts"]["NO_TRADE"] == 1
+    assert "Positions opened today: 1" in result["text"]
+    assert "Still active: 1" in result["text"]
+
+
+def test_notify_session_end_routes_discord_only(real_db):
+    config = _config()
+    with patch("skills.options_engine_skill.route_message") as mock_route:
+        notify_session_end(config, today=date(2026, 7, 21))
+
+    mock_route.assert_called_once()
+    assert mock_route.call_args[0][0] == "option_trading"
+    assert mock_route.call_args.kwargs["send_telegram"] is False
 
 
 # --------------------------------------------------------------------------
