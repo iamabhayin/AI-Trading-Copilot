@@ -48,6 +48,9 @@ class Config(BaseModel):
     discord_channel_monitoring: str = ""
     discord_channel_chat: str = ""
     discord_channel_closed_trades: str = ""
+    # Phase 15: Option Trading advisories, position updates, watch-mode
+    # escalations, and confirmed false breakouts.
+    discord_channel_option_trading: str = ""
 
     # Ollama
     ollama_host: str = ""
@@ -125,6 +128,7 @@ class ConfigLoader:
                 discord_channel_monitoring=os.getenv("DISCORD_CHANNEL_MONITORING", ""),
                 discord_channel_chat=os.getenv("DISCORD_CHANNEL_CHAT", ""),
                 discord_channel_closed_trades=os.getenv("DISCORD_CHANNEL_CLOSED_TRADES", ""),
+                discord_channel_option_trading=os.getenv("DISCORD_CHANNEL_OPTION_TRADING", ""),
                 ollama_host=os.getenv("OLLAMA_HOST", ""),
                 ollama_model=os.getenv("OLLAMA_MODEL", ""),
                 sqlite_db_path=os.getenv("SQLITE_DB_PATH", "db/trading_copilot.db"),

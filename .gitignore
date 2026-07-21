@@ -2,6 +2,11 @@
 .env
 openclaw.json
 
+# Option Trading (Phase 15) — cached broker session tokens / instrument masters
+db/.angel_token.json
+db/.angel_instruments.json
+db/.options_engine.lock
+
 # SQLite databases
 *.db
 *.sqlite

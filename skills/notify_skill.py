@@ -41,6 +41,9 @@ DISCORD_CHANNEL_FIELD_BY_TYPE = {
     "monitoring": "discord_channel_monitoring",
     "chat": "discord_channel_chat",
     "closed_trade": "discord_channel_closed_trades",
+    # Phase 15: Option Trading advisories, position updates, watch-mode
+    # escalations, and confirmed false breakouts all route here.
+    "option_trading": "discord_channel_option_trading",
 }
 
 
