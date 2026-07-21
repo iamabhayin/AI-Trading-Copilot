@@ -53,6 +53,11 @@ Each phase is its own branch off `develop` (see repo's branching strategy), merg
 | 8 | Discord dual-channel rollout, refinements | Adds Discord as organized reading/logging surface once Telegram flow is trusted | ✅ Done — merged into `main` (PR #16) |
 | 9 | Inbound message routing (CLI entry points, OpenClaw agent dispatch) | Turns Discord/Telegram replies into real Position Tracker / Chat Skill calls | ✅ Done — merged into `develop` (PR #18) |
 | 10 | 1h timeframe migration + live 3x/day scheduler | Real cron jobs on the OpenClaw Gateway, not just config | ✅ Done — merged into `develop` (PR #19) |
+| 11 | Named chart-pattern detection (pullback, EMA cross, BB squeeze) in Signal Skill | Rationale can name a setup; doesn't force the action just because a pattern exists | ✅ Done — merged into `develop` directly, then `develop` → `main` (PR #24) |
+| 12 | Jaipur gold/silver metals price digest | Standalone, no trading judgment — Discord `#market-news` only | ✅ Done — merged into `develop` (PR #25) |
+| 13 | 20-period volume ratio indicator | Confirming signal for Phase 11's named setups, not a standalone trigger | ✅ Done — merged into `develop` (PR #26) |
+| 14 | Global market cues (S&P 500/Nasdaq/VIX/USD-INR/crude) in Signal Skill | Additive context + Ollama-generated sentiment narrative digest | ✅ Done — merged into `develop` (PR #29) |
+| 15 | NIFTY Options Trading Engine (Angel One data source, analytics, rules engine, trade selector, position lifecycle) | New standalone feature, own config/schema/cron jobs — see below | 🚧 Live on cron, not yet merged into `develop` |
 
 ## Phase Status
 
@@ -116,11 +121,57 @@ Detail behind the Build order table above — what each completed skill does, wh
 - **The scheduler is genuinely live**: 4 real jobs on the OpenClaw Gateway (via `openclaw cron add`, not `openclaw.config.yaml` — that file is a documentation-only placeholder OpenClaw never reads) — `pre_market_run` (08:30 IST), `midday_run` (12:00 IST), `pre_close_run` (14:45 IST), and `monitor_check` (15:35 IST), all Mon–Fri. Jobs are plain command payloads (direct `argv`, not a shell string) rather than agent-turn jobs, so they run deterministically without depending on a shell binary or routing through the agent's (deliberately narrow, see Phase 9) exec-approvals allowlist.
 - Verified live end-to-end: a real scheduled run produced a real BUY suggestion that was delivered to the configured Discord signals channel, and the position-monitor job ran clean with no open positions.
 
+### Phase 11 — Named Chart-Pattern Detection
+
+- **`signal_skill.py`**'s `SYSTEM_PROMPT` gained guidance for three named setups — pullback in an uptrend, EMA golden/death cross, Bollinger Band squeeze/breakout — framed as "name it if present in the rationale, don't force the action just because a pattern exists."
+- **`indicator_engine.summarize_recent(df, n=10)`** — an oldest-to-newest history window (separate from `summarize_latest()`'s single snapshot), since the EMA-cross and BB-squeeze checks need to judge something "recent."
+
+### Phase 12 — Jaipur Gold/Silver Metals Price Digest
+
+- **`skills/metals_price_skill.py`** — scrapes goodreturns.in's Jaipur gold/silver rate pages, formats via Ollama with a plain-template fallback. Routes to Discord `#market-news` only (`notify_skill.route_message()` gained a `send_telegram: bool = True` param so a message type can opt out of Telegram entirely). No trading judgment, never touches Claude.
+- Two live cron jobs: `metals_price_morning` (08:30 IST), `metals_price_evening` (18:15 IST).
+
+### Phase 13 — Volume Ratio Indicator
+
+- **`indicator_engine.py`** gained a 4th indicator, `volume_ratio_20` (current volume ÷ its own rolling 20-period average, plain pandas, no new dependency) — a simplified reintroduction of the volume-anomaly signal dropped in Phase 10's indicator trim.
+- Wired into `signal_skill.py`'s `SYSTEM_PROMPT` as a *confirming* signal for the Phase 11 named setups only — not a standalone BUY/SELL trigger.
+
+### Phase 14 — Global Market Cues
+
+- **`skills/global_cues_skill.py`** — fetches S&P 500/Nasdaq/VIX/USD-INR/crude via yfinance (reusing `fetch_ohlcv`), plus an Ollama-generated bullish/bearish sentiment narrative for Indian markets (`fetch_market_news()` + reasoning from price action) for the digest — deliberately kept on Ollama rather than Claude, since this is a cheap, high-frequency call and the narrative is directional color, not a number that must survive verbatim.
+- Wired into `signal_skill.py`'s `SYSTEM_PROMPT`/`generate_suggestion()` as additive "Overnight Global Cues" context, fetched once per `main()` run.
+- **`ENABLE_RISK_REGIME_BIAS`** flag (`config/settings.py`, default `False`) + a `--regime-check` CLI flag on `signal_skill.main()` — both must be set for the gated risk-regime tag to activate; off by default.
+- One live cron job: `global_cues_morning` (07:30 IST).
+
+### Phase 15 — NIFTY Options Trading Engine
+
+A full options data source, analytics, rules engine, trade selector, and position lifecycle for NIFTY options — spec'd in `docs/options-rulebook.md` (the trading rulebook: chain analytics, market/trade rejection rules, position-monitor states, scoring weights) and `docs/options-data-sources.md`. Independent of the equity pipeline: own config (`config/options_config.py`), own DB tables (`option_chain_snapshots`, `options_advisories`, `options_positions`, `options_engine_state`), own cron schedule.
+
+- **`skills/angel_client.py`** — Angel One SmartAPI client: unattended login (client code + PIN + TOTP, cron-compatible), option chain + Greeks fetch, instruments master (never hardcodes expiry/strike/lot size), a mandatory sanity check (`assert_greeks_sanity`) guarding a known SmartAPI bug where the Greeks endpoint occasionally serves monthly-expiry data for a weekly request. **Data only — never places an order.**
+- **`skills/options_data_fetch.py`** — yfinance backup layer (NIFTY candles, backup spot cross-check, India VIX) and the shared `DataInsufficientError`.
+- **`skills/options_analytics.py`** — pure chain analytics (OI/PCR/max pain/etc.) that produce a hypothesis, never a trade decision.
+- **`skills/options_rules_engine.py`** — dual-cadence (NORMAL/WATCH) state machine, breakout/breakdown confirmation, market-level hard rejections, scoring.
+- **`skills/options_trade_selector.py`** — direction → expiry → strike → entry zone → SL → targets → R:R → position size → final rejection pass, strictly sequential per the rulebook. Falls back to the next available expiry (one extra on-demand live fetch, not fetched every cycle) when the nearest weekly doesn't have enough runway for a new trade, so the engine doesn't just sit out entirely on an expiry day.
+- **`skills/options_position_entry.py`** / **`skills/options_position_monitor.py`** — Discord reply parsing (regex-first + Ollama-fallback, mirroring `position_tracker_skill.py`) and per-cycle re-evaluation of every open position's *original, immutable* thesis (never mutates `thesis_json`) into HOLD/HOLD_TRAIL/PARTIAL_PROFIT/EXIT_TARGET/EXIT_THESIS_INVALIDATED/EXIT_RISK_CHANGED.
+- **`skills/options_engine_skill.py`** — the cron orchestrator tying the pure modules to live I/O and wall-clock time. Includes a code-level `is_market_hours()` guard (defense in depth — cron's `* 9-15 * * 1-5` can't cleanly express the exact 09:15–15:30 IST window in one entry) and a lightweight lockfile guard against overlapping runs.
+- **Alerts** lead with the actual contract to act on — `Suggest: BUY NIFTY {strike} {CE/PE}, expiry {readable date}` (e.g. "21 July") — instead of separate strike/side/expiry fields the reader has to piece together.
+- **Live cron jobs** (all Asia/Kolkata, Mon–Fri): `options_engine_cycle` (`* 9-15 * * 1-5`, 1-min cadence gated by `is_market_hours()`), `options_engine_eod` (15:35, snapshot cleanup + state reset), `options_engine_session_start` (09:15, Discord-only heartbeat — deliberately independent of Angel One/live data, so it proves the cron itself is alive), `options_engine_session_end` (15:30, day summary: advisory counts, positions opened/closed, engine mode at close).
+- **Verified live** (2026-07-21) against a real Angel One account: login, instruments master, spot/Greeks/market-data field names all matched the code's assumptions on the first real response. Found and fixed 3 bugs that only live execution could surface: (1) the instruments-master file is ~35MB and took ~165s to download — the original 30s timeout would have failed every single day; (2) the live DB had schema drift (two columns added to `schema.sql` after the table was first created, never applied — this project has no migration tooling, so a `schema.sql` edit to an *existing* table needs a manual `ALTER TABLE`); (3) ran a full orchestrator cycle against real data with notifications intercepted, confirmed correct regime classification, proximity detection, and WATCH-mode escalation end to end.
+- **Known, deliberately-scoped-out limitation**: a position opened off the next-weekly fallback expiry won't appear in position-monitor alerts until the original (now-expired) weekly rolls off and the fallback expiry becomes the new cycle-primary expiry — self-heals within ~1–2 trading days.
+- **Not yet done**: merge into `develop`/`main`; no trade has gone through the full advisory → Discord entry → position-monitor → exit lifecycle live yet (two real WATCH sessions occurred on 2026-07-21, both resolved without confirming — the engine correctly declined to force a trade rather than producing a false signal).
+
 ### Test summary
 
-115 tests total (includes 5 for `config/startup.py`'s `StartupService`, added during the structure refactor between Phases 4 and 5). Run with `pytest`.
+497 tests total, repo-wide (`pytest`). Includes 313 in the Phase 15 options suite alone.
 
 ## Notes
 
 - No auto-execution of trades — the bot only advises and monitors; you always buy/sell manually.
 - Secrets (API keys, tokens) live only in `.env`, never in the repo.
+
+## Known issues (as of 2026-07-21)
+
+- **`pre_close_run` cron job is missing from the live Gateway.** One of Phase 10's original 4 jobs (14:45 IST signal pipeline run), confirmed via `openclaw cron list` to no longer exist — only 12 jobs are live, not the 13 `openclaw.config.yaml` now documents. Nothing in this session removed it; how/when it disappeared is unconfirmed. See `openclaw.config.yaml`'s `pre_close_run` entry for the exact re-registration command, held pending confirmation this loss was unintentional.
+- **Anthropic API usage limit reached** on the account used for Claude calls — every equity-pipeline signal generation call has been failing since before this date ("You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC."). Cron jobs still report "ok" (per-ticker error isolation from Phase 10 fails open), so **this is silent unless you read the actual job output** — no real trading signals have been produced while this is in effect. Needs action on the Anthropic account side; nothing to fix in code.
+- **Global market cues (Phase 14) intermittently failed to fetch** — at least one `midday_run` returned "No OHLCV data returned" for all 5 index/commodity tickers (S&P 500, Nasdaq, VIX, USD-INR, crude oil) via yfinance. Not yet root-caused as a one-off vs. a recurring problem.
+- ~~`monitor_check` crashed daily on a Rupee sign in the Ollama-polished status digest (Windows console cp1252 can't encode it)~~ — fixed 2026-07-21 (`skills/monitor_skill.py`, reconfigures stdout to UTF-8).

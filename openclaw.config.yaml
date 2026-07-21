@@ -16,6 +16,13 @@
 # and doesn't belong here anyway. Keep these as plain command payloads with
 # direct argv going forward; delivery mode "none" since each script sends
 # its own Telegram/Discord notifications via notify_skill.route_message().
+#
+# STATUS as of 2026-07-21: 12 real jobs live on the Gateway (up from 4) --
+# see the individual job comments below for what's been added since
+# 2026-07-06 (metals digest, global cues, and the 4 Phase 15 Options
+# Engine jobs). Verify against `openclaw cron list` if in doubt; this file
+# is never authoritative over the live Gateway state, only a readable
+# summary of it.
 
 scheduler:
   # Full pipeline: data fetch -> indicator engine -> signal skill -> notify skill.
@@ -34,6 +41,16 @@ scheduler:
     timezone: Asia/Kolkata
     command: .venv/Scripts/python.exe skills/signal_skill.py
 
+  # MISSING FROM THE LIVE GATEWAY as of 2026-07-21 -- `openclaw cron list`
+  # only shows 12 jobs, not the 13 this file (now) accounts for. This was
+  # one of Phase 10's original 4 jobs; nothing in this session removed it,
+  # and how/when it disappeared is unconfirmed. Re-register with:
+  #   openclaw cron add --name pre_close_run --cron "45 14 * * 1-5" \
+  #     --tz Asia/Kolkata \
+  #     --command-argv '[".venv/Scripts/python.exe", "skills/signal_skill.py"]' \
+  #     --command-cwd "<repo path>" --timeout-seconds 900 --no-deliver
+  # once confirmed this loss was unintentional.
+  #
   # Full pipeline, repurposed from the old monitor_check slot. Last check
   # before market close.
   pre_close_run:
@@ -83,6 +100,51 @@ scheduler:
     timezone: Asia/Kolkata
     command: .venv/Scripts/python.exe skills/metals_price_skill.py
 
+  # Phase 14: overnight global market cues (S&P 500/Nasdaq/VIX/USD-INR/
+  # crude) fed into Signal Skill's decision prompt as additive context.
+  global_cues_morning:
+    enabled: true
+    cron: "30 7 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/global_cues_skill.py
+
+  # Phase 15: NIFTY Options Trading Engine. Meant to be invoked every
+  # 1 minute 09:15-15:30 IST; options_engine_skill.py's own
+  # is_market_hours() guard trims the broader "9-15" cron hour range down
+  # to the exact window (cron can't cleanly express 09:15-15:30 in one
+  # entry). Delivery mode "none" -- the skill sends its own Discord/
+  # Telegram notifications via notify_skill.route_message().
+  options_engine_cycle:
+    enabled: true
+    cron: "* 9-15 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/options_engine_skill.py
+
+  # End-of-day snapshot retention cleanup + engine state reset.
+  options_engine_eod:
+    enabled: true
+    cron: "35 15 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/options_engine_skill.py --eod
+
+  # Discord-only heartbeat, deliberately independent of Angel One/live
+  # data -- proves the cron itself is alive each morning, separate from
+  # whether the data source is having problems (that has its own
+  # #monitoring error path via fetch_cycle_data).
+  options_engine_session_start:
+    enabled: true
+    cron: "15 9 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/options_engine_skill.py --session-start
+
+  # Discord-only day summary: advisory counts by action, positions
+  # opened/closed, engine mode at close.
+  options_engine_session_end:
+    enabled: true
+    cron: "30 15 * * 1-5"
+    timezone: Asia/Kolkata
+    command: .venv/Scripts/python.exe skills/options_engine_skill.py --session-end
+
 skills:
   - name: data_fetch_skill
     enabled: true
@@ -105,6 +167,16 @@ skills:
     manual_only: true
   # Standalone Jaipur gold/silver digest, not part of the NSE signal pipeline
   - name: metals_price_skill
+    enabled: true
+  # Overnight S&P 500/Nasdaq/VIX/USD-INR/crude context, fed into signal_skill
+  - name: global_cues_skill
+    enabled: true
+  # Phase 15: NIFTY Options Trading Engine -- independent feature, own
+  # config/schema/cron jobs. angel_client.py/options_data_fetch.py/
+  # options_analytics.py/options_rules_engine.py/options_trade_selector.py/
+  # options_position_entry.py/options_position_monitor.py are library
+  # modules used by this orchestrator, not scheduled directly.
+  - name: options_engine_skill
     enabled: true
 
 channels:
