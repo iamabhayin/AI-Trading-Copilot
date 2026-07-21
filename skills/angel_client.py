@@ -313,6 +313,15 @@ def _parse_master_expiry(expiry: str) -> date:
     return datetime.strptime(expiry, "%d%b%Y").date()
 
 
+def format_expiry_readable(expiry: str) -> str:
+    """Angel's DDMMMYYYY expiry (e.g. '21JUL2026') as a human-readable
+    'day Month' string (e.g. '21 July') for alert messages -- alerts show
+    this alongside the raw expiry, never in place of it, since 'day Month'
+    alone is ambiguous across a year boundary."""
+    parsed = _parse_master_expiry(expiry)
+    return f"{parsed.day} {parsed.strftime('%B')}"
+
+
 def list_expiries(contracts: list[dict]) -> list[str]:
     """Sorted unique expiry strings (e.g. '24JUL2025') from a filtered
     NIFTY OPTIDX contract list."""

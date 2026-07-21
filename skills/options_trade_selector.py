@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.options_config import OptionsConfig
 from db.database import execute
+from skills.angel_client import format_expiry_readable
 from skills.notify_skill import route_message
 
 
@@ -485,7 +486,9 @@ def _template_advisory_message(payload: dict) -> str:
     action = payload["action"]
     lines = [f"NIFTY Options - {action}"]
     if action in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
-        lines.append(f"{payload['strike']:g} {payload['side']} ({payload['moneyness']}), expiry {payload['expiry']}")
+        readable_expiry = format_expiry_readable(payload["expiry"])
+        lines.append(f"Suggest: BUY NIFTY {payload['strike']:g} {payload['side']}, expiry {readable_expiry}")
+        lines.append(f"({payload['moneyness']}, full expiry {payload['expiry']})")
         if payload.get("why"):
             lines.append("")
             lines.append("Why this breakout:")

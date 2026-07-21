@@ -123,7 +123,7 @@ def test_open_position_with_matching_advisory(real_db):
     conn = sqlite3.connect(real_db)
     row = conn.execute("SELECT status, contract, lot_size, entry_premium FROM options_positions WHERE id = ?", (position_id,)).fetchone()
     conn.close()
-    assert row == ("active", "NIFTY 25200 CE 24JUL2025", 75, 145.0)
+    assert row == ("active", "NIFTY 25200 CE 24 July", 75, 145.0)
 
 
 def test_open_position_no_matching_advisory_returns_none(real_db):

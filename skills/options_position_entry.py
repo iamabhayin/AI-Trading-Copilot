@@ -24,6 +24,7 @@ import requests
 
 from config.settings import Settings
 from db.database import execute, fetch_one
+from skills.angel_client import format_expiry_readable
 
 BUY_WORDS = {"bought", "buy", "long"}
 SELL_WORDS = {"sold", "sell", "closed", "close"}
@@ -140,7 +141,7 @@ def open_position(trade: dict) -> int | None:
     if not lot_size:
         return None
 
-    contract = f"NIFTY {trade['strike']:g} {trade['side']} {trade['expiry']}"
+    contract = f"NIFTY {trade['strike']:g} {trade['side']} {format_expiry_readable(trade['expiry'])}"
     return execute(
         """
         INSERT INTO options_positions

@@ -472,6 +472,18 @@ def test_write_advisory_persists(real_db):
     assert row == ("WAIT", 50)
 
 
+def test_format_advisory_message_states_contract_and_readable_expiry():
+    payload = {
+        "action": "BUY_PE_CANDIDATE", "strike": 24150.0, "side": "PE", "moneyness": "ATM",
+        "expiry": "28JUL2026", "entry_zone": (24100.0, 24115.0), "underlying_invalidation": 24200.0,
+        "option_stop": 60.0, "target_1": 90.0, "target_2": 120.0, "risk_reward": 2.2,
+        "position_size_lots": 3, "confidence": 78, "data_timestamp": "2026-07-21T10:00:00+05:30",
+    }
+    message = format_advisory_message(payload)
+    assert "Suggest: BUY NIFTY 24150 PE, expiry 28 July" in message
+    assert "28JUL2026" in message  # unambiguous full expiry still present
+
+
 def test_format_advisory_message_is_always_the_deterministic_template():
     # Regression test: format_advisory_message must never go through an
     # LLM rewrite for this message type (found live -- Ollama silently

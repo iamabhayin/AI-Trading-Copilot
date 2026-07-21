@@ -33,6 +33,7 @@ from skills.angel_client import (
     fetch_nifty_spot,
     fetch_option_greeks,
     filter_nifty_option_contracts,
+    format_expiry_readable,
     join_greeks_and_market_data,
     list_expiries,
     login,
@@ -458,6 +459,11 @@ def test_list_expiries_sorted_by_actual_date():
     contracts = [{"expiry": "31JUL2025"}, {"expiry": "24JUL2025"}, {"expiry": "24JUL2025"}]
 
     assert list_expiries(contracts) == ["24JUL2025", "31JUL2025"]
+
+
+def test_format_expiry_readable():
+    assert format_expiry_readable("21JUL2026") == "21 July"
+    assert format_expiry_readable("04AUG2026") == "4 August"
 
 
 def test_select_weekly_and_monthly_expiry_same_month():
