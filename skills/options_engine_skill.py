@@ -34,10 +34,14 @@ from config.options_config import OptionsConfig
 from db.database import execute, fetch_all, fetch_one
 from skills.angel_client import (
     AngelAuthError,
+    build_client,
     ensure_instruments_master,
+    ensure_session,
+    fetch_expiry_chain,
     filter_nifty_option_contracts,
     list_expiries,
     run_market_data_cycle,
+    select_next_weekly_expiry,
     select_weekly_and_monthly_expiry,
 )
 from skills.notify_skill import route_message
@@ -354,7 +358,14 @@ def run_position_monitor_pass(analysis: dict, spot: float, config: OptionsConfig
         side = position["side"]
         current_row = next((r for r in analysis["chain"] if r["strike"] == position["strike"] and r["side"] == side), None)
         if current_row is None:
-            continue  # this contract fell outside the fetched window this cycle -- skip, don't guess
+            # Contract outside this cycle's fetched window -- e.g. a
+            # position opened off _fetch_next_weekly_chain_fallback()'s
+            # next-weekly chain while the primary cycle still fetches the
+            # (about-to-expire) nearest weekly. Self-heals within ~1-2
+            # trading days once that weekly expires and this expiry
+            # becomes the new primary; skip rather than guess in the
+            # meantime.
+            continue
 
         opposite_side = "PE" if side == "CE" else "CE"
         opposite_classification = check_level_strike_oi_behavior(
@@ -474,6 +485,41 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
         release_lock(config)
 
 
+def _fetch_next_weekly_chain_fallback(cycle_data: dict, spot: float, config: OptionsConfig, today: date) -> list[dict] | None:
+    """Rulebook Section 34 fallback: only called when the primary weekly
+    expiry's chain didn't have enough runway for a new trade
+    (select_trade's own "insufficient time to expiry" rejection, e.g. the
+    weekly expires today or tomorrow). One extra live Greeks + market-data
+    fetch for the next available expiry, on demand -- not fetched every
+    cycle, to stay well inside Angel One's empirically-observed rate limit
+    (see angel_client.py's module docstring). Returns None (falls through
+    to the original NO_TRADE) if there's no later expiry listed or the
+    fallback fetch itself fails.
+
+    Known limitation: a position opened off this fallback chain uses a
+    different expiry than the cycle's primary fetch, so
+    run_position_monitor_pass()'s per-cycle chain lookup won't find it
+    until the primary weekly actually expires and the next weekly becomes
+    the new primary (at most ~1-2 trading days) -- monitoring resumes
+    automatically at that point, this isn't a permanent blind spot.
+    """
+    contracts = cycle_data["contracts"]
+    available_expiries = list_expiries(contracts)
+    next_expiry = select_next_weekly_expiry(available_expiries, cycle_data["expiry"], today)
+    if next_expiry is None:
+        return None
+    try:
+        session = ensure_session(config)
+        client = build_client(config, session)
+        return fetch_expiry_chain(client, contracts, next_expiry, spot, config.angel_atm_strike_window)
+    except (AngelAuthError, DataInsufficientError) as exc:
+        route_message(
+            "monitoring", f"Option Trading engine: next-weekly fallback fetch failed -- {exc}",
+            send_telegram=False, telegram_parse_mode=None,
+        )
+        return None
+
+
 def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analysis, confirmation, spot, atr, regime, now, config, today):
     """Runs the Trade Selector on a confirmed breakout/breakdown and
     persists + (maybe) notifies the resulting advisory."""
@@ -501,6 +547,29 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
         today=today,
     )
 
+    if result["action"] == "NO_TRADE" and result.get("reasons") == ["insufficient time to expiry"]:
+        fallback_chain = _fetch_next_weekly_chain_fallback(cycle_data, spot, config, today)
+        if fallback_chain:
+            result = select_trade(
+                direction=direction,
+                confirmation_level=level,
+                option_side=option_side,
+                expiry_chain=fallback_chain,
+                contracts=cycle_data["contracts"],
+                entry_spot=spot,
+                support_resistance=analysis["support_resistance"],
+                atr=atr,
+                capital=config.capital,
+                config=config,
+                today=today,
+            )
+
+    # NOTE: if `result` came from the fallback chain (a different expiry
+    # than `chain`/`previous_snapshot`), these lookups legitimately find
+    # nothing -- oi_change/previous_oi fall through to None below, same
+    # as any other selected_strike outside the primary window. Fetching a
+    # second expiry's OI history here isn't worth the extra live call for
+    # what's already a rare fallback path.
     selected_strike = result.get("trade", {}).get("strike") if result.get("trade") else None
     current_oi_row = next((r for r in chain if r["strike"] == selected_strike and r["side"] == option_side), None) if selected_strike else None
     previous_oi_row = next((r for r in previous_snapshot if r["strike"] == selected_strike and r["side"] == option_side), None) if selected_strike else None

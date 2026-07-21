@@ -607,6 +607,52 @@ def _delta(current, previous):
 # --------------------------------------------------------------------------
 
 
+def _join_strikes(client: SmartConnect, contracts: list[dict], expiry: str, strikes: list[float], greeks: list[dict]) -> list[dict]:
+    """Market-data fetch + join for an already-selected strike window and
+    already-fetched Greeks. Factored out of run_market_data_cycle() so its
+    weekly-expiry Greeks fetch (shared with the sanity check) is never
+    duplicated, while fetch_expiry_chain() below can reuse the same join
+    logic for a standalone, on-demand expiry fetch."""
+    strike_set = set(strikes)
+    tokens = [
+        token
+        for strike in strikes
+        for side in ("CE", "PE")
+        if (token := resolve_symboltoken(contracts, expiry, strike, side))
+    ]
+    market_by_token = fetch_market_data_batched(client, tokens)
+
+    greeks_in_window = [g for g in greeks if _safe_float(g.get("strikePrice")) in strike_set]
+    return join_greeks_and_market_data(greeks_in_window, market_by_token, contracts, expiry)
+
+
+def fetch_expiry_chain(client: SmartConnect, contracts: list[dict], expiry: str, spot: float, strike_window: int) -> list[dict]:
+    """Standalone Greeks + market-data fetch for one expiry's ATM window,
+    outside the main daily cycle -- no snapshot write, no weekly/monthly
+    Greeks sanity check (that check guards a persistent SmartAPI bug via a
+    weekly-vs-monthly comparison, which doesn't apply to an ad-hoc single-
+    expiry fetch). Used by the Task 7 orchestrator's rulebook Section 34
+    fallback: when the primary weekly expiry doesn't have enough runway
+    left for a new trade, this fetches the next available expiry's chain
+    on demand, rather than fetching it (and paying its Greeks/market-data
+    rate-limit cost) on every single cycle."""
+    strikes = select_atm_strikes(contracts, expiry, spot, strike_window)
+    if not strikes:
+        raise DataInsufficientError(f"No listed strikes found for expiry {expiry}")
+    greeks = fetch_option_greeks(client, expiry)
+    return _join_strikes(client, contracts, expiry, strikes, greeks)
+
+
+def select_next_weekly_expiry(available_expiries: list[str], nearest_weekly: str, today: date) -> str | None:
+    """The next listed future expiry after `nearest_weekly` -- the
+    rulebook Section 34 fallback target when the nearest weekly doesn't
+    have enough runway for a new trade (e.g. it expires today or
+    tomorrow). Returns None if no later expiry is listed."""
+    future = sorted((e for e in available_expiries if _parse_master_expiry(e) >= today), key=_parse_master_expiry)
+    later = [e for e in future if e != nearest_weekly]
+    return later[0] if later else None
+
+
 def run_market_data_cycle(
     config: OptionsConfig,
     weekly_expiry: str,
@@ -653,17 +699,7 @@ def run_market_data_cycle(
         assert_greeks_sanity(weekly_greeks, monthly_greeks, atm_strike)
         greeks_sanity_checked = True
 
-    strike_set = set(strikes)
-    tokens = [
-        token
-        for strike in strikes
-        for side in ("CE", "PE")
-        if (token := resolve_symboltoken(contracts, weekly_expiry, strike, side))
-    ]
-    market_by_token = fetch_market_data_batched(client, tokens)
-
-    greeks_in_window = [g for g in weekly_greeks if _safe_float(g.get("strikePrice")) in strike_set]
-    joined = join_greeks_and_market_data(greeks_in_window, market_by_token, contracts, weekly_expiry)
+    joined = _join_strikes(client, contracts, weekly_expiry, strikes, weekly_greeks)
 
     snapshot_ts = datetime.now(IST).isoformat()
     resolved_trading_date = trading_date or datetime.now(IST).date().isoformat()

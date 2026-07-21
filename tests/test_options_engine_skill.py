@@ -16,8 +16,11 @@ import pandas as pd
 import pytest
 
 from config.options_config import OptionsConfig
+from skills.angel_client import AngelAuthError
 from skills.options_data_fetch import DataInsufficientError
 from skills.options_engine_skill import (
+    _fetch_next_weekly_chain_fallback,
+    _handle_confirmed,
     acquire_lock,
     fetch_cycle_data,
     fetch_first_of_day_snapshot,
@@ -251,6 +254,124 @@ def test_format_false_breakout_message():
     text = format_false_breakout_message(25200.0, "UP", {"oi_classification": "SHORT_BUILDUP"})
     assert "FALSE BREAKOUT" in text
     assert "SHORT_BUILDUP" in text
+
+
+# --------------------------------------------------------------------------
+# Rulebook Section 34 fallback: next-weekly expiry when the primary weekly
+# doesn't have enough runway for a new trade
+# --------------------------------------------------------------------------
+
+
+def test_fetch_next_weekly_chain_fallback_returns_none_without_later_expiry():
+    cycle_data = _cycle_data(spot=25010.0)
+    config = _config()
+
+    with (
+        patch("skills.options_engine_skill.list_expiries", return_value=["24JUL2025"]),
+        patch("skills.options_engine_skill.select_next_weekly_expiry", return_value=None) as mock_select,
+    ):
+        result = _fetch_next_weekly_chain_fallback(cycle_data, spot=25010.0, config=config, today=date(2025, 7, 24))
+
+    assert result is None
+    mock_select.assert_called_once()
+
+
+def test_fetch_next_weekly_chain_fallback_fetches_next_expiry():
+    cycle_data = _cycle_data(spot=25010.0)
+    config = _config()
+    fallback_chain = [_chain_row(25200.0, "CE")]
+
+    with (
+        patch("skills.options_engine_skill.list_expiries", return_value=["24JUL2025", "31JUL2025"]),
+        patch("skills.options_engine_skill.select_next_weekly_expiry", return_value="31JUL2025"),
+        patch("skills.options_engine_skill.ensure_session", return_value={"jwt_token": "j"}),
+        patch("skills.options_engine_skill.build_client", return_value=MagicMock()),
+        patch("skills.options_engine_skill.fetch_expiry_chain", return_value=fallback_chain) as mock_fetch,
+    ):
+        result = _fetch_next_weekly_chain_fallback(cycle_data, spot=25010.0, config=config, today=date(2025, 7, 24))
+
+    assert result == fallback_chain
+    assert mock_fetch.call_args[0][2] == "31JUL2025"
+
+
+def test_fetch_next_weekly_chain_fallback_returns_none_on_fetch_failure():
+    cycle_data = _cycle_data(spot=25010.0)
+    config = _config()
+
+    with (
+        patch("skills.options_engine_skill.list_expiries", return_value=["24JUL2025", "31JUL2025"]),
+        patch("skills.options_engine_skill.select_next_weekly_expiry", return_value="31JUL2025"),
+        patch("skills.options_engine_skill.ensure_session", side_effect=AngelAuthError("boom")),
+        patch("skills.options_engine_skill.route_message") as mock_route,
+    ):
+        result = _fetch_next_weekly_chain_fallback(cycle_data, spot=25010.0, config=config, today=date(2025, 7, 24))
+
+    assert result is None
+    mock_route.assert_called_once()
+    assert mock_route.call_args[0][0] == "monitoring"
+
+
+def test_handle_confirmed_retries_with_fallback_chain_when_insufficient_time():
+    engine_state = {"watch_direction": "UP", "watch_level": 25200.0}
+    chain = _sample_chain()
+    cycle_data = _cycle_data(spot=25230.0, chain=chain)
+    analysis = {"support_resistance": {"resistance": [25200.0]}, "volume": {"confirmed": True}, "pcr": 1.0, "greeks_crosscheck": []}
+    confirmation = {"confirmed": True, "oi_classification": "LONG_BUILDUP"}
+    config = _config(min_score=0)
+    fallback_chain = [_chain_row(25200.0, "CE")]
+    first_result = {"action": "NO_TRADE", "reasons": ["insufficient time to expiry"], "trade": None}
+    second_result = {
+        "action": "BUY_CE_CANDIDATE",
+        "trade": {
+            "expiry": "31JUL2025", "strike": 25200.0, "side": "CE", "moneyness": "ATM",
+            "entry_zone": (25200.0, 25225.0), "underlying_invalidation": 25100.0,
+            "option_stop": 60.0, "target_1": 90.0, "target_2": 120.0, "risk_reward": 2.0,
+            "position_size_lots": 2, "lot_size": 75, "entry_premium": 75.0,
+        },
+    }
+
+    with (
+        patch("skills.options_engine_skill.select_trade", side_effect=[first_result, second_result]) as mock_select_trade,
+        patch("skills.options_engine_skill._fetch_next_weekly_chain_fallback", return_value=fallback_chain) as mock_fallback,
+        patch("skills.options_engine_skill.write_advisory") as mock_write,
+        patch("skills.options_engine_skill.notify_advisory") as mock_notify,
+    ):
+        _handle_confirmed(
+            engine_state, chain, [], cycle_data, analysis, confirmation, 25230.0, atr=10.0, regime="BULLISH",
+            now=datetime(2026, 7, 20, 10, 20, tzinfo=IST), config=config, today=date(2026, 7, 20),
+        )
+
+    assert mock_select_trade.call_count == 2
+    mock_fallback.assert_called_once()
+    assert mock_select_trade.call_args_list[1].kwargs["expiry_chain"] == fallback_chain
+    mock_write.assert_called_once()
+    mock_notify.assert_called_once()
+
+
+def test_handle_confirmed_no_retry_when_fallback_unavailable():
+    engine_state = {"watch_direction": "UP", "watch_level": 25200.0}
+    chain = _sample_chain()
+    cycle_data = _cycle_data(spot=25230.0, chain=chain)
+    analysis = {"support_resistance": {"resistance": [25200.0]}, "volume": {}, "pcr": 1.0, "greeks_crosscheck": []}
+    confirmation = {"confirmed": True, "oi_classification": "LONG_BUILDUP"}
+    config = _config()
+    first_result = {"action": "NO_TRADE", "reasons": ["insufficient time to expiry"], "trade": None}
+
+    with (
+        patch("skills.options_engine_skill.select_trade", return_value=first_result) as mock_select_trade,
+        patch("skills.options_engine_skill._fetch_next_weekly_chain_fallback", return_value=None) as mock_fallback,
+        patch("skills.options_engine_skill.write_advisory") as mock_write,
+        patch("skills.options_engine_skill.notify_advisory") as mock_notify,
+    ):
+        _handle_confirmed(
+            engine_state, chain, [], cycle_data, analysis, confirmation, 25230.0, atr=10.0, regime="BULLISH",
+            now=datetime(2026, 7, 20, 10, 20, tzinfo=IST), config=config, today=date(2026, 7, 20),
+        )
+
+    assert mock_select_trade.call_count == 1
+    mock_fallback.assert_called_once()
+    mock_write.assert_called_once()
+    mock_notify.assert_not_called()
 
 
 # --------------------------------------------------------------------------

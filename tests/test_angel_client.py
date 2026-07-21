@@ -31,6 +31,7 @@ from skills.angel_client import (
     fetch_market_data,
     fetch_market_data_batched,
     fetch_nifty_spot,
+    fetch_expiry_chain,
     fetch_option_greeks,
     filter_nifty_option_contracts,
     format_expiry_readable,
@@ -41,6 +42,7 @@ from skills.angel_client import (
     resolve_symboltoken,
     run_market_data_cycle,
     select_atm_strikes,
+    select_next_weekly_expiry,
     select_weekly_and_monthly_expiry,
     write_snapshot,
 )
@@ -836,3 +838,39 @@ def test_run_market_data_cycle_greeks_sanity_failure_propagates(real_db):
         run_market_data_cycle(
             config, weekly_expiry="24JUL2025", monthly_expiry="28AUG2025", trading_date="2026-07-20"
             )
+
+
+# --------------------------------------------------------------------------
+# Rulebook Section 34 fallback: next-weekly expiry when the nearest weekly
+# is too close (fetch_expiry_chain / select_next_weekly_expiry)
+# --------------------------------------------------------------------------
+
+
+def test_fetch_expiry_chain_returns_joined_rows():
+    contracts = filter_nifty_option_contracts(_sample_instruments())
+    client = MagicMock()
+    client.optionGreek.return_value = {"status": True, "data": _sample_greeks()}
+    client.getMarketData.side_effect = lambda mode, exchange_tokens: _sample_market_data_response(exchange_tokens["NFO"])
+
+    joined = fetch_expiry_chain(client, contracts, "24JUL2025", spot=25010.5, strike_window=10)
+
+    assert len(joined) == 2
+    assert {row["side"] for row in joined} == {"CE", "PE"}
+    client.optionGreek.assert_called_once()
+
+
+def test_fetch_expiry_chain_no_strikes_raises():
+    with pytest.raises(DataInsufficientError):
+        fetch_expiry_chain(MagicMock(), contracts=[], expiry="24JUL2025", spot=25010.5, strike_window=10)
+
+
+def test_select_next_weekly_expiry_picks_first_later_expiry():
+    available = ["21JUL2026", "28JUL2026", "04AUG2026"]
+
+    assert select_next_weekly_expiry(available, nearest_weekly="21JUL2026", today=date(2026, 7, 21)) == "28JUL2026"
+
+
+def test_select_next_weekly_expiry_none_when_no_later_expiry():
+    available = ["21JUL2026"]
+
+    assert select_next_weekly_expiry(available, nearest_weekly="21JUL2026", today=date(2026, 7, 21)) is None
