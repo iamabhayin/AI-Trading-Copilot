@@ -264,6 +264,14 @@ def main() -> None:
     from config.startup import StartupService
     from skills.notify_skill import route_message
 
+    # Cron's captured stdout defaults to the Windows console codepage
+    # (cp1252), which can't encode characters Ollama's phrasing pass may
+    # introduce (e.g. the Rupee sign, U+20B9) -- crashed print(digest)
+    # below in production even though the actual alert/digest delivery
+    # had already succeeded. UTF-8 covers everything cp1252 can and more.
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     StartupService().start()
 
     alerts, statuses = monitor_all_positions()
