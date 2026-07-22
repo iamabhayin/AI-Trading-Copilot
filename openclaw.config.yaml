@@ -41,23 +41,13 @@ scheduler:
     timezone: Asia/Kolkata
     command: .venv/Scripts/python.exe skills/signal_skill.py
 
-  # MISSING FROM THE LIVE GATEWAY as of 2026-07-21 -- `openclaw cron list`
-  # only shows 12 jobs, not the 13 this file (now) accounts for. This was
-  # one of Phase 10's original 4 jobs; nothing in this session removed it,
-  # and how/when it disappeared is unconfirmed. Re-register with:
-  #   openclaw cron add --name pre_close_run --cron "45 14 * * 1-5" \
-  #     --tz Asia/Kolkata \
-  #     --command-argv '[".venv/Scripts/python.exe", "skills/signal_skill.py"]' \
-  #     --command-cwd "<repo path>" --timeout-seconds 900 --no-deliver
-  # once confirmed this loss was unintentional.
-  #
-  # Full pipeline, repurposed from the old monitor_check slot. Last check
-  # before market close.
-  pre_close_run:
-    enabled: true
-    cron: "45 14 * * 1-5"
-    timezone: Asia/Kolkata
-    command: .venv/Scripts/python.exe skills/signal_skill.py
+  # REMOVED (2026-07-14, via `openclaw cron rm`) -- pre_close_run ran the
+  # full watchlist through signal_skill.py a third time daily on top of
+  # pre_market_run/midday_run. Deliberate cost cut, done alongside
+  # trimming WATCHLIST from 63 tickers to 10: 3 runs x 63 tickers = 189
+  # Claude calls/day -> 2 runs x 10 tickers = 20/day. (Briefly flagged as
+  # an unexplained disappearance on 2026-07-21 before the intent was found
+  # documented on the unmerged `docs-remove-pre-close-run` branch.)
 
   # Position risk-check (Claude risk judgment + stop-loss/target trigger on
   # open positions) — moved to its own slot since monitor_check's original
