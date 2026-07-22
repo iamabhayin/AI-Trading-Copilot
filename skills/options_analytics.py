@@ -249,6 +249,33 @@ def detect_oi_support_resistance(chain: list[dict], top_n: int = 1) -> dict:
     }
 
 
+def detect_next_level(chain: list[dict], side: str, beyond_level: float, direction: str, config: OptionsConfig) -> float | None:
+    """Next OI concentration beyond the current wall, same option side --
+    e.g. the next PE-OI cluster below a support wall, shown in alerts as
+    a forward-looking target if the wall breaks (Part B). Purely
+    informational/display, never a trade trigger: requires the strongest
+    beyond-the-wall strike to hold at least config.next_level_min_share of
+    the total OI out there, so a negligible strike isn't flagged as a
+    meaningful level. 'Beyond' means further from spot in the breakout
+    direction -- lower strikes for a support/DOWN wall, higher strikes for
+    a resistance/UP wall."""
+    beyond_rows = [
+        row
+        for row in chain
+        if row["side"] == side and (row["strike"] < beyond_level if direction == "DOWN" else row["strike"] > beyond_level)
+    ]
+    if not beyond_rows:
+        return None
+    total_oi = sum(row.get("oi") or 0 for row in beyond_rows)
+    if total_oi <= 0:
+        return None
+    best = max(beyond_rows, key=lambda r: r.get("oi") or 0)
+    best_oi = best.get("oi") or 0
+    if best_oi < total_oi * config.next_level_min_share:
+        return None
+    return best["strike"]
+
+
 def detect_swing_levels(candles: pd.DataFrame, lookback: int = 20) -> dict:
     """Simple price-structure swing high/low over the trailing `lookback`
     candles, to merge with OI-based levels."""

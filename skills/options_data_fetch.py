@@ -65,6 +65,24 @@ def fetch_india_vix() -> float | None:
     return float(closes.iloc[-1]) if not closes.empty else None
 
 
+def fetch_india_vix_with_change() -> dict | None:
+    """India VIX latest close + change vs the previous close, for alert
+    context (Part B of the alert-staleness-fix spec). Returns None on any
+    fetch failure or insufficient history -- callers must render VIX as
+    unavailable rather than guessing, same fail-open convention as every
+    other yfinance-backed fetch in this module."""
+    try:
+        data = fetch_ohlcv(YF_VIX_TICKER, timeframe="1d", period="5d")
+    except Exception:
+        return None
+    closes = data["close"].dropna()
+    if len(closes) < 2:
+        return None
+    latest = float(closes.iloc[-1])
+    previous = float(closes.iloc[-2])
+    return {"latest": latest, "change": latest - previous}
+
+
 def check_spot_divergence(primary_spot: float | None, yfinance_spot: float | None, config: OptionsConfig) -> dict:
     """Compare the primary fetched spot (Angel One) against yfinance's
     backup spot. The primary value always wins; this only produces a

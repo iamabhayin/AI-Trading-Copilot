@@ -32,6 +32,7 @@ from skills.options_analytics import (
     crosscheck_greeks,
     crosscheck_greeks_near_atm,
     detect_level_migration,
+    detect_next_level,
     detect_oi_support_resistance,
     detect_swing_levels,
     detect_zone_merge,
@@ -120,6 +121,39 @@ def test_section_18_support_resistance_matches_rulebook_narrative():
     levels = detect_oi_support_resistance(chain)
     assert levels["support"] == [24800.0]  # strongest PE OI = 60L
     assert levels["resistance"] == [25200.0]  # strongest CE OI = 70L
+
+
+def test_detect_next_level_finds_strongest_cluster_beyond_wall():
+    chain = [
+        {"strike": 24000.0, "side": "PE", "oi": 5_000_000},
+        {"strike": 23950.0, "side": "PE", "oi": 500_000},
+        {"strike": 23900.0, "side": "PE", "oi": 4_000_000},  # dominant beyond-wall cluster
+        {"strike": 23850.0, "side": "PE", "oi": 300_000},
+    ]
+    config = OptionsConfig(next_level_min_share=0.15)
+    assert detect_next_level(chain, "PE", beyond_level=24000.0, direction="DOWN", config=config) == 23900.0
+
+
+def test_detect_next_level_resistance_side_looks_above():
+    chain = [
+        {"strike": 24200.0, "side": "CE", "oi": 5_000_000},
+        {"strike": 24300.0, "side": "CE", "oi": 4_000_000},
+    ]
+    config = OptionsConfig(next_level_min_share=0.15)
+    assert detect_next_level(chain, "CE", beyond_level=24200.0, direction="UP", config=config) == 24300.0
+
+
+def test_detect_next_level_no_candidates_beyond_wall_returns_none():
+    chain = [{"strike": 24000.0, "side": "PE", "oi": 5_000_000}]
+    config = OptionsConfig(next_level_min_share=0.15)
+    assert detect_next_level(chain, "PE", beyond_level=24000.0, direction="DOWN", config=config) is None
+
+
+def test_detect_next_level_below_min_share_returns_none():
+    # No single strike dominates -- OI spread thin across many strikes.
+    chain = [{"strike": 23900.0 - i * 50, "side": "PE", "oi": 100_000} for i in range(10)]
+    config = OptionsConfig(next_level_min_share=0.15)
+    assert detect_next_level(chain, "PE", beyond_level=24000.0, direction="DOWN", config=config) is None
 
 
 def test_section_18_change_in_oi_matches_stated_deltas():

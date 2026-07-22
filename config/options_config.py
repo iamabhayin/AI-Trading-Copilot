@@ -60,6 +60,11 @@ class OptionsConfig(BaseModel):
     boundary_min_share: float = 0.20
     strike_window_primary: int = 5
     strike_window_extended: int = 10
+    # Minimum share of total beyond-the-wall OI (same side) a single
+    # strike must hold to be shown as a "next level" in alerts -- purely
+    # informational/display, never a trade trigger. Same style as
+    # boundary_min_share (a 0-1 fraction, not a percentage number).
+    next_level_min_share: float = 0.15
     greeks_crosscheck_enabled: bool = True
     # Minimum |% move| in premium/OI to count as a real signal rather than
     # noise, when classifying LONG_BUILDUP/SHORT_BUILDUP/SHORT_COVERING/
@@ -175,6 +180,7 @@ class OptionsConfigLoader:
                 watch_timeout_minutes=int(_env("OPTIONS_WATCH_TIMEOUT_MINUTES", "45")),
                 volume_confirm_multiplier=float(_env("OPTIONS_VOLUME_CONFIRM_MULTIPLIER", "1.5")),
                 boundary_min_share=float(_env("OPTIONS_BOUNDARY_MIN_SHARE", "0.20")),
+                next_level_min_share=float(_env("OPTIONS_NEXT_LEVEL_MIN_SHARE", "0.15")),
                 strike_window_primary=int(_env("OPTIONS_STRIKE_WINDOW_PRIMARY", "5")),
                 strike_window_extended=int(_env("OPTIONS_STRIKE_WINDOW_EXTENDED", "10")),
                 greeks_crosscheck_enabled=OptionsConfig._parse_bool(

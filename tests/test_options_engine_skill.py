@@ -20,6 +20,8 @@ from skills.angel_client import AngelAuthError
 from skills.options_data_fetch import DataInsufficientError
 from skills.options_engine_skill import (
     _fetch_next_weekly_chain_fallback,
+    _format_confirmation_checklist,
+    _format_delta_oi_lines,
     _handle_confirmed,
     _handle_escalation,
     _handle_false_breakout,
@@ -46,6 +48,7 @@ from skills.options_engine_skill import (
     run_end_of_day,
     save_engine_state,
     should_run_normal_cycle,
+    signed_distance_pts,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -254,10 +257,9 @@ def test_format_watch_escalation_message():
     text = format_watch_escalation_message(25200.0, "UP", 25190.0, analysis)
     assert "WATCHING NIFTY RESISTANCE" in text
     assert "25200" in text
-    assert "Support (OI wall): 24800" in text
-    assert "Support (price structure): 24825.4" in text
-    assert "Resistance (OI wall): 25200" in text
-    assert "Resistance (price structure): 25260.12" in text
+    assert "RESISTANCE: 25200 (OI wall)" in text
+    assert "RESISTANCE (price structure): 25260.12" in text
+    assert "Support: 24800 (OI wall)" in text
 
 
 def test_format_watch_escalation_message_includes_timestamps_when_provided():
@@ -296,6 +298,129 @@ def test_format_false_breakout_message():
     text = format_false_breakout_message(25200.0, "UP", {"oi_classification": "SHORT_BUILDUP"})
     assert "FALSE BREAKOUT" in text
     assert "SHORT_BUILDUP" in text
+
+
+def test_format_false_breakout_message_includes_checklist_and_valid_until():
+    confirmation = {
+        "crossed": True, "sustained": False, "volume_confirmed": True,
+        "oi_supports": False, "structure_agrees": True, "retest": False,
+        "oi_classification": "SHORT_BUILDUP",
+    }
+    text = format_false_breakout_message(25200.0, "UP", confirmation, valid_until=datetime(2026, 7, 22, 10, 5, tzinfo=IST))
+    assert "✅  Price crossed the level" in text
+    assert "❌  Sustained beyond the level" in text
+    assert "❌  Retest of the level held" in text
+    assert "VERDICT: FALSE BREAKOUT" in text
+    assert "Valid until: 10:05:00 IST (next scan)" in text
+
+
+# --------------------------------------------------------------------------
+# Part B: signed distance, ΔOI-at-strike, confirmation checklist
+# --------------------------------------------------------------------------
+
+
+def test_signed_distance_pts_up_not_yet_reached_is_positive():
+    assert signed_distance_pts(24190.0, 24200.0, "UP") == pytest.approx(10.0)
+
+
+def test_signed_distance_pts_up_already_past_is_negative():
+    assert signed_distance_pts(24210.0, 24200.0, "UP") == pytest.approx(-10.0)
+
+
+def test_signed_distance_pts_down_matches_real_incident():
+    # The actual incident numbers: spot 24015, level 24022.2, already
+    # breached by 7.2 pts -- must render as a real negative number, never
+    # rounded away to "0.00%".
+    assert signed_distance_pts(24015.0, 24022.2, "DOWN") == pytest.approx(-7.2)
+
+
+def test_signed_distance_pts_down_still_safe_is_positive():
+    assert signed_distance_pts(24030.0, 24022.2, "DOWN") == pytest.approx(7.8)
+
+
+def test_format_confirmation_checklist_all_pending_when_no_confirmation():
+    lines = _format_confirmation_checklist(None)
+    assert all("⏳" in line for line in lines[1:])
+
+
+def test_format_confirmation_checklist_mixed_states():
+    confirmation = {
+        "crossed": True, "sustained": False, "volume_confirmed": True,
+        "oi_supports": True, "structure_agrees": False, "retest": None,
+    }
+    lines = _format_confirmation_checklist(confirmation)
+    text = "\n".join(lines)
+    assert "✅  Price crossed the level" in text
+    assert "❌  Sustained beyond the level" in text
+    assert "✅  Level-strike OI supports the move" in text
+    assert "❌  Broader trend structure agrees" in text
+    assert "Retest" not in text  # retest=None (no retest occurred) -- omitted, not shown as failed
+
+
+def test_format_confirmation_checklist_includes_retest_when_present():
+    confirmation = {"crossed": True, "sustained": True, "volume_confirmed": True, "oi_supports": True, "structure_agrees": True, "retest": True}
+    text = "\n".join(_format_confirmation_checklist(confirmation))
+    assert "✅  Retest of the level held" in text
+
+
+def test_format_delta_oi_lines_tags_primary_side_defending():
+    chain = [{"strike": 24000.0, "side": "PE", "oi": 6_000_000}, {"strike": 24000.0, "side": "CE", "oi": 1_300_000}]
+    previous = [{"strike": 24000.0, "side": "PE", "oi": 4_800_000}, {"strike": 24000.0, "side": "CE", "oi": 1_000_000}]
+    lines = _format_delta_oi_lines(24000.0, "PE", chain, previous)
+    assert "24000 PE: +12.0L  -> writers DEFENDING the wall" in lines[0]
+    assert "24000 CE: +3.0L" in lines[1]
+    assert "writers" not in lines[1]
+
+
+def test_format_delta_oi_lines_tags_unwinding_on_negative_change():
+    chain = [{"strike": 24000.0, "side": "PE", "oi": 4_000_000}]
+    previous = [{"strike": 24000.0, "side": "PE", "oi": 6_000_000}]
+    lines = _format_delta_oi_lines(24000.0, "PE", chain, previous)
+    assert "-20.0L  -> writers UNWINDING" in lines[0]
+
+
+def test_format_delta_oi_lines_skips_missing_data():
+    assert _format_delta_oi_lines(24000.0, "PE", [], None) == []
+
+
+def test_format_watch_escalation_message_full_rich_rendering():
+    """End-to-end: the real incident's numbers, with a zone-merge, a next
+    level, ΔOI, PCR/VIX, and an all-pending checklist all rendering
+    together in one alert."""
+    analysis = {
+        "regime": "RANGE",
+        "oi_levels": {"support": [24000.0], "resistance": [24200.0]},
+        "price_levels": {"swing_low": 24022.2, "swing_high": 24197.2},
+        "pcr": 0.86265,
+        "vix": {"latest": 13.8, "change": 0.2},
+    }
+    chain = [
+        {"strike": 24000.0, "side": "PE", "oi": 6_000_000},
+        {"strike": 24000.0, "side": "CE", "oi": 1_300_000},
+        {"strike": 23900.0, "side": "PE", "oi": 4_000_000},
+    ]
+    previous_snapshot = [
+        {"strike": 24000.0, "side": "PE", "oi": 4_800_000},
+        {"strike": 24000.0, "side": "CE", "oi": 1_000_000},
+    ]
+    config = OptionsConfig(zone_merge_threshold_pct=0.15, next_level_min_share=0.15)
+
+    text = format_watch_escalation_message(
+        24000.0, "DOWN", 24023.1, analysis,
+        chain=chain, previous_snapshot=previous_snapshot, confirmation=None, config=config,
+        valid_until=datetime(2026, 7, 21, 14, 26, tzinfo=IST),
+    )
+
+    assert "SUPPORT ZONE: 24000 (OI wall) -- 22 pts -- 24022.2 (structure)" in text
+    assert "Next level below: 23900 (next PE-OI cluster)" in text
+    assert "Resistance: 24200 (OI wall)" in text
+    assert "PCR: 0.86        VIX: 13.8 (+0.2)" in text
+    assert "24000 PE: +12.0L  -> writers DEFENDING the wall" in text
+    assert "24000 CE: +3.0L" in text
+    assert "CONFIRMATION CHECKLIST" in text
+    assert "⏳  Price crossed the level" in text
+    assert "VERDICT: WATCH" in text
+    assert "Valid until: 14:26:00 IST (next scan)" in text
 
 
 # --------------------------------------------------------------------------
@@ -342,15 +467,16 @@ def test_record_alert_sent_persists_row(real_db):
 def test_handle_escalation_sends_watching_when_not_yet_crossed(real_db):
     next_state = {"watch_level": 25200.0, "watch_direction": "UP"}
     analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.0}
-    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30"}
+    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30", "chain": []}
     now = datetime(2026, 7, 22, 10, 0, 5, tzinfo=IST)
 
     with (
         patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=25190.0),
+        patch("skills.options_engine_skill.fetch_india_vix_with_change", return_value=None),
         patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
         patch("skills.options_engine_skill.notify_breach_unconfirmed") as mock_breach,
     ):
-        _handle_escalation(next_state, cycle_spot=25185.0, analysis=analysis, cycle_data=cycle_data, now=now)
+        _handle_escalation(next_state, cycle_spot=25185.0, analysis=analysis, cycle_data=cycle_data, now=now, previous_snapshot=[], config=OptionsConfig())
 
     mock_watching.assert_called_once()
     mock_breach.assert_not_called()
@@ -367,15 +493,16 @@ def test_handle_escalation_sends_breach_unconfirmed_when_already_crossed(real_db
     crossed the level, but a fresh re-check shows the market already has."""
     next_state = {"watch_level": 24022.2, "watch_direction": "DOWN"}
     analysis = {"regime": "BEARISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 0.9}
-    cycle_data = {"snapshot_ts": "2026-07-21T14:24:59+05:30"}
+    cycle_data = {"snapshot_ts": "2026-07-21T14:24:59+05:30", "chain": []}
     now = datetime(2026, 7, 21, 14, 25, 3, tzinfo=IST)
 
     with (
         patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=24015.0),
+        patch("skills.options_engine_skill.fetch_india_vix_with_change", return_value=None),
         patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
         patch("skills.options_engine_skill.notify_breach_unconfirmed") as mock_breach,
     ):
-        _handle_escalation(next_state, cycle_spot=24023.1, analysis=analysis, cycle_data=cycle_data, now=now)
+        _handle_escalation(next_state, cycle_spot=24023.1, analysis=analysis, cycle_data=cycle_data, now=now, previous_snapshot=[], config=OptionsConfig())
 
     mock_watching.assert_not_called()
     mock_breach.assert_called_once()
@@ -391,14 +518,15 @@ def test_handle_escalation_sends_breach_unconfirmed_when_already_crossed(real_db
 def test_handle_escalation_passes_refetch_failure_through(real_db):
     next_state = {"watch_level": 25200.0, "watch_direction": "UP"}
     analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.0}
-    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30"}
+    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30", "chain": []}
     now = datetime(2026, 7, 22, 10, 0, 5, tzinfo=IST)
 
     with (
         patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=None),
+        patch("skills.options_engine_skill.fetch_india_vix_with_change", return_value=None),
         patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
     ):
-        _handle_escalation(next_state, cycle_spot=25190.0, analysis=analysis, cycle_data=cycle_data, now=now)
+        _handle_escalation(next_state, cycle_spot=25190.0, analysis=analysis, cycle_data=cycle_data, now=now, previous_snapshot=[], config=OptionsConfig())
 
     assert mock_watching.call_args[0][2] == 25190.0  # fell back to cycle spot
     assert mock_watching.call_args[0][6] is False  # spot_refetch_ok
@@ -627,6 +755,7 @@ def test_run_cycle_escalates_when_near_resistance(real_db, tmp_path):
     with (
         patch("skills.options_engine_skill.fetch_cycle_data", return_value=cycle_data),
         patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=25191.0),
+        patch("skills.options_engine_skill.fetch_india_vix_with_change", return_value=None),
         patch("skills.options_engine_skill.notify_watch_escalation") as mock_notify,
     ):
         result = run_cycle(config, now)
