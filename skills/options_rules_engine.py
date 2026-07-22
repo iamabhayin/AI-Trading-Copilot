@@ -81,6 +81,17 @@ def classify_regime(spot: float, support: float | None, resistance: float | None
 # --------------------------------------------------------------------------
 
 
+def has_crossed_level(spot: float, level: float, direction: str) -> bool:
+    """True if spot is already on the far side of `level` in `direction`
+    -- distinct from check_proximity ("close to"). Used at alert-send
+    time to catch a level that's already been breached by the time a
+    fresh spot re-check runs, since the cycle's own spot (fetched
+    earlier) can be stale by several seconds to minutes (alert-staleness
+    fix, Part A2). A strict comparison, matching detect_price_cross's
+    convention -- merely touching the level doesn't count as crossed."""
+    return spot > level if direction == "UP" else spot < level
+
+
 def check_proximity(spot: float, level: float, config: OptionsConfig, atr: float | None = None) -> bool:
     if config.proximity_mode == "atr":
         if not atr:

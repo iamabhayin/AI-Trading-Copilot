@@ -34,6 +34,7 @@ from skills.options_analytics import (
     detect_level_migration,
     detect_oi_support_resistance,
     detect_swing_levels,
+    detect_zone_merge,
     merge_support_resistance,
     select_strike_window,
     years_to_expiry,
@@ -310,10 +311,52 @@ def test_detect_swing_levels_empty_candles():
 
 
 def test_merge_support_resistance_combines_oi_and_price():
+    # 50 pts apart on both sides -- beyond the default 0.15%-of-spot zone
+    # threshold (~37.5 pts at spot 25000), so both stay independent.
     oi_based = {"support": [24800.0], "resistance": [25200.0]}
     price_based = {"swing_high": 25250.0, "swing_low": 24750.0}
-    merged = merge_support_resistance(oi_based, price_based)
+    merged = merge_support_resistance(oi_based, price_based, spot=25000.0, config=OptionsConfig())
     assert merged == {"support": [24750.0, 24800.0], "resistance": [25200.0, 25250.0]}
+
+
+def test_merge_support_resistance_zone_merges_close_structure_level():
+    # 22 pts apart -- inside the ~36-pt zone threshold at spot 24015
+    # (real incident numbers: OI wall 24000, structure level 24022.2).
+    # The structure level must NOT survive as an independent candidate.
+    oi_based = {"support": [24000.0], "resistance": []}
+    price_based = {"swing_high": None, "swing_low": 24022.2}
+    merged = merge_support_resistance(oi_based, price_based, spot=24015.0, config=OptionsConfig())
+    assert merged["support"] == [24000.0]
+
+
+def test_detect_zone_merge_within_threshold():
+    config = OptionsConfig(zone_merge_threshold_pct=0.15)
+    zone = detect_zone_merge(24000.0, 24022.2, spot=24015.0, config=config)
+    assert zone == {"oi_wall": 24000.0, "structure_level": 24022.2, "width_points": pytest.approx(22.2)}
+
+
+def test_detect_zone_merge_at_exact_threshold_boundary_is_not_merged():
+    config = OptionsConfig(zone_merge_threshold_pct=0.15)
+    threshold = 24000.0 * 0.15 / 100  # == 36.0
+    assert detect_zone_merge(24000.0, 24000.0 + threshold, spot=24000.0, config=config) is None
+
+
+def test_detect_zone_merge_beyond_threshold_returns_none():
+    config = OptionsConfig(zone_merge_threshold_pct=0.15)
+    assert detect_zone_merge(24000.0, 24200.0, spot=24015.0, config=config) is None
+
+
+def test_detect_zone_merge_no_structure_level_returns_none():
+    config = OptionsConfig(zone_merge_threshold_pct=0.15)
+    assert detect_zone_merge(24000.0, None, spot=24015.0, config=config) is None
+
+
+def test_detect_zone_merge_wall_above_structure():
+    # Resistance-side geometry: OI wall above spot, structure level just
+    # below it -- merge direction shouldn't matter, only the distance.
+    config = OptionsConfig(zone_merge_threshold_pct=0.15)
+    zone = detect_zone_merge(24200.0, 24190.0, spot=24180.0, config=config)
+    assert zone == {"oi_wall": 24200.0, "structure_level": 24190.0, "width_points": 10.0}
 
 
 def test_detect_level_migration_flags_a_shift():

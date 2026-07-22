@@ -24,7 +24,8 @@ pending your explicit approval of the `openclaw cron add` command.
 """
 
 import sys
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,7 +47,12 @@ from skills.angel_client import (
 )
 from skills.notify_skill import route_message
 from skills.options_analytics import build_market_analysis, compute_atr, years_to_expiry
-from skills.options_data_fetch import DataInsufficientError, cleanup_old_snapshots, fetch_nifty_candles
+from skills.options_data_fetch import (
+    DataInsufficientError,
+    cleanup_old_snapshots,
+    fetch_nifty_candles,
+    fetch_nifty_spot_backup,
+)
 from skills.options_position_monitor import (
     build_position_evidence,
     evaluate_position,
@@ -61,6 +67,7 @@ from skills.options_rules_engine import (
     detect_price_trend,
     evaluate_breakout_confirmation,
     evaluate_market_rejections,
+    has_crossed_level,
     score_confirmation,
     score_delta_oi,
     score_iv_greeks,
@@ -302,7 +309,35 @@ def _format_labeled_levels(analysis: dict) -> list[str]:
     return lines
 
 
-def format_watch_escalation_message(level: float, direction: str, spot: float, analysis: dict) -> str:
+def _format_alert_timestamps(data_ts: datetime | None, sent_ts: datetime | None) -> list[str]:
+    """data_ts (chain snapshot time) vs sent_ts (alert delivery time) --
+    lets a reader see for themselves how stale an alert's underlying data
+    was by the time it arrived (alert-staleness fix, Part A1/A3)."""
+    if data_ts is None and sent_ts is None:
+        return []
+    lines = [""]
+    if data_ts is not None:
+        lines.append(f"Data as of: {data_ts:%H:%M:%S} IST")
+    if sent_ts is not None:
+        lines.append(f"Sent at: {sent_ts:%H:%M:%S} IST")
+    return lines
+
+
+def _spot_refetch_warning(spot_refetch_ok: bool) -> list[str]:
+    if spot_refetch_ok:
+        return []
+    return ["", "WARNING: spot re-check failed -- data may be stale"]
+
+
+def format_watch_escalation_message(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+) -> str:
     side = "resistance" if direction == "UP" else "support"
     outcome = "bullish breakout -> CE" if direction == "UP" else "bearish breakdown -> PE"
     distance_pct = abs(spot - level) / level * 100
@@ -316,14 +351,71 @@ def format_watch_escalation_message(level: float, direction: str, spot: float, a
         f"Regime: {analysis.get('regime')}",
         *_format_labeled_levels(analysis),
         f"PCR: {analysis.get('pcr')}",
+        *_spot_refetch_warning(spot_refetch_ok),
         "",
         "Engine has switched to 1-min monitoring to judge this level.",
+        *_format_alert_timestamps(data_ts, sent_ts),
     ]
     return "\n".join(lines)
 
 
-def notify_watch_escalation(level: float, direction: str, spot: float, analysis: dict) -> None:
-    route_message("option_trading", format_watch_escalation_message(level, direction, spot, analysis), send_telegram=False, telegram_parse_mode=None)
+def notify_watch_escalation(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+) -> None:
+    text = format_watch_escalation_message(level, direction, spot, analysis, data_ts, sent_ts, spot_refetch_ok)
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
+
+
+def format_breach_unconfirmed_message(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+) -> str:
+    """Sent instead of the plain WATCHING alert when a fresh spot
+    re-check (Part A1) shows the level was already crossed by send time
+    (Part A2) -- a "WATCHING" message for a level the market has already
+    moved through is wrong by definition."""
+    side = "resistance" if direction == "UP" else "support"
+    outcome = "bullish breakout -> CE" if direction == "UP" else "bearish breakdown -> PE"
+    distance_pct = abs(spot - level) / level * 100
+    lines = [
+        f"LEVEL BREACHED -- AWAITING CONFIRMATION ({side.upper()})",
+        "",
+        f"Spot: {spot:g} already past {level:g} {side} ({distance_pct:.2f}% beyond)",
+        f"Direction if confirmed: {outcome}",
+        "",
+        f"Regime: {analysis.get('regime')}",
+        *_format_labeled_levels(analysis),
+        f"PCR: {analysis.get('pcr')}",
+        *_spot_refetch_warning(spot_refetch_ok),
+        "",
+        "Engine has switched to 1-min monitoring to confirm this breakout/breakdown.",
+        *_format_alert_timestamps(data_ts, sent_ts),
+    ]
+    return "\n".join(lines)
+
+
+def notify_breach_unconfirmed(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+) -> None:
+    text = format_breach_unconfirmed_message(level, direction, spot, analysis, data_ts, sent_ts, spot_refetch_ok)
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
 
 
 def format_false_breakout_message(level: float, direction: str, confirmation: dict) -> str:
@@ -339,6 +431,69 @@ def format_false_breakout_message(level: float, direction: str, confirmation: di
 
 def notify_false_breakout(level: float, direction: str, confirmation: dict) -> None:
     route_message("option_trading", format_false_breakout_message(level, direction, confirmation), send_telegram=False, telegram_parse_mode=None)
+
+
+# --------------------------------------------------------------------------
+# Alert staleness fix -- fresh-spot re-check + valid_until (Part A1/A2/A3)
+# --------------------------------------------------------------------------
+
+
+def refetch_spot_for_alert(cycle_spot: float) -> tuple[float, bool]:
+    """Best-effort fresh spot check immediately before alert delivery
+    (Part A1) -- yfinance, single call, not a full Angel One re-fetch.
+    Falls back to the cycle's own (possibly stale) spot on failure;
+    callers must render the re-check-failed warning when the second
+    element is False."""
+    fresh = fetch_nifty_spot_backup()
+    if fresh is None:
+        return cycle_spot, False
+    return fresh, True
+
+
+def compute_valid_until(now: datetime, next_mode: str) -> datetime:
+    """Next scheduled scan time for the mode being entered -- WATCH mode
+    runs 1-min cadence, NORMAL mode 5-min (Part A3)."""
+    minutes = 1 if next_mode == "WATCH" else 5
+    return now + timedelta(minutes=minutes)
+
+
+def record_alert_sent(alert_type: str, direction: str | None, level: float | None, data_ts: str | None, valid_until: datetime) -> None:
+    execute(
+        "INSERT INTO options_alerts_sent (sent_ts, alert_type, direction, level, data_ts, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
+        (datetime.now(IST).isoformat(), alert_type, direction, level, data_ts, valid_until.isoformat()),
+    )
+
+
+def _handle_escalation(next_state: dict, cycle_spot: float, analysis: dict, cycle_data: dict, now: datetime) -> None:
+    """Rulebook A1/A2 staleness fix: re-check spot immediately before
+    choosing which alert to send. The cycle's own spot was fetched at the
+    top of fetch_cycle_data() -- potentially minutes ago on a cache-miss
+    cycle (verified live: ~165s alone for the instruments master on a
+    cold cache) -- so it may already be stale by the time an alert is
+    about to go out."""
+    level = next_state["watch_level"]
+    direction = next_state["watch_direction"]
+
+    fresh_spot, refetch_ok = refetch_spot_for_alert(cycle_spot)
+    sent_ts = datetime.now(IST)
+    data_ts = datetime.fromisoformat(cycle_data["snapshot_ts"])
+
+    if has_crossed_level(fresh_spot, level, direction):
+        notify_breach_unconfirmed(level, direction, fresh_spot, analysis, data_ts, sent_ts, refetch_ok)
+        alert_type = "BREACH_UNCONFIRMED"
+    else:
+        notify_watch_escalation(level, direction, fresh_spot, analysis, data_ts, sent_ts, refetch_ok)
+        alert_type = "WATCHING"
+
+    record_alert_sent(alert_type, direction, level, data_ts.isoformat(), compute_valid_until(now, "WATCH"))
+
+
+def _handle_false_breakout(engine_state: dict, confirmation: dict, now: datetime) -> None:
+    notify_false_breakout(engine_state["watch_level"], engine_state["watch_direction"], confirmation)
+    record_alert_sent(
+        "FALSE_BREAKOUT", engine_state["watch_direction"], engine_state["watch_level"], None,
+        compute_valid_until(now, "NORMAL"),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -472,9 +627,9 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
 
         action = transition["action"]
         if action == "ESCALATE":
-            notify_watch_escalation(transition["next_state"]["watch_level"], transition["next_state"]["watch_direction"], spot, analysis)
+            _handle_escalation(transition["next_state"], spot, analysis, cycle_data, now)
         elif action == "FALSE_BREAKOUT":
-            notify_false_breakout(engine_state["watch_level"], engine_state["watch_direction"], confirmation)
+            _handle_false_breakout(engine_state, confirmation, now)
         elif action == "CONFIRMED":
             _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analysis, confirmation, spot, atr, regime, now, config, today)
 

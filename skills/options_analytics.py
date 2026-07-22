@@ -276,15 +276,47 @@ def compute_atr(candles: pd.DataFrame, period: int = 14) -> float | None:
     return float(atr) if pd.notna(atr) else None
 
 
-def merge_support_resistance(oi_based: dict, price_based: dict) -> dict:
+def detect_zone_merge(oi_level: float, structure_level: float | None, spot: float, config: OptionsConfig) -> dict | None:
+    """Whether an OI-wall level and a price-structure level (for the same
+    side) sit close enough together to be treated as one zone: a real
+    incident showed an alert watching a structure level 22 points from
+    the actual OI wall it was supposedly guarding, with the wall itself
+    still untouched -- a structure edge that close to the wall has no
+    room to be an independent trade trigger.
+
+    Returns None if `structure_level` is missing or the two aren't within
+    `config.zone_merge_threshold_pct` of spot; otherwise a dict with both
+    edges and the zone width in points. **The OI wall is always the
+    trigger** -- callers must never watch/confirm a breakout against the
+    structure edge once a zone is detected.
+    """
+    if structure_level is None:
+        return None
+    threshold = spot * config.zone_merge_threshold_pct / 100
+    if abs(structure_level - oi_level) >= threshold:
+        return None
+    return {"oi_wall": oi_level, "structure_level": structure_level, "width_points": abs(structure_level - oi_level)}
+
+
+def merge_support_resistance(oi_based: dict, price_based: dict, spot: float, config: OptionsConfig) -> dict:
     """Merge OI-derived levels with price-structure swing highs/lows into
-    one candidate set per side."""
-    support = set(oi_based.get("support") or [])
-    resistance = set(oi_based.get("resistance") or [])
-    if price_based.get("swing_low") is not None:
-        support.add(price_based["swing_low"])
-    if price_based.get("swing_high") is not None:
-        resistance.add(price_based["swing_high"])
+    one candidate set per side. A structure level that zone-merges with
+    an OI wall for the same side (detect_zone_merge) is dropped from the
+    candidate set entirely -- it's zone context, never an independent
+    trigger; the OI wall alone remains the actionable level."""
+    oi_support = oi_based.get("support") or []
+    oi_resistance = oi_based.get("resistance") or []
+    support = set(oi_support)
+    resistance = set(oi_resistance)
+
+    swing_low = price_based.get("swing_low")
+    if swing_low is not None and not any(detect_zone_merge(level, swing_low, spot, config) for level in oi_support):
+        support.add(swing_low)
+
+    swing_high = price_based.get("swing_high")
+    if swing_high is not None and not any(detect_zone_merge(level, swing_high, spot, config) for level in oi_resistance):
+        resistance.add(swing_high)
+
     return {"support": sorted(support), "resistance": sorted(resistance)}
 
 
@@ -436,7 +468,7 @@ def build_market_analysis(
 
     oi_levels = detect_oi_support_resistance(window)
     price_levels = detect_swing_levels(candles) if candles is not None else {"swing_high": None, "swing_low": None}
-    levels = merge_support_resistance(oi_levels, price_levels)
+    levels = merge_support_resistance(oi_levels, price_levels, spot, config)
     migration = detect_level_migration(levels, previous_levels)
 
     volume = check_volume_confirmation(candles, config) if candles is not None else {

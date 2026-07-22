@@ -28,6 +28,7 @@ from skills.options_rules_engine import (
     evaluate_breakout_confirmation,
     evaluate_market_rejections,
     find_nearest_level,
+    has_crossed_level,
     score_confirmation,
     score_delta_oi,
     score_iv_greeks,
@@ -133,6 +134,26 @@ def test_check_proximity_atr_mode():
 def test_check_proximity_atr_mode_missing_atr_returns_false():
     config = _config(proximity_mode="atr", atr_multiplier=0.5)
     assert check_proximity(25190.0, 25200.0, config, atr=None) is False
+
+
+def test_has_crossed_level_up_true_when_spot_above():
+    assert has_crossed_level(24205.0, 24200.0, "UP") is True
+
+
+def test_has_crossed_level_up_false_when_spot_below():
+    assert has_crossed_level(24195.0, 24200.0, "UP") is False
+
+
+def test_has_crossed_level_up_false_when_spot_equals_level():
+    assert has_crossed_level(24200.0, 24200.0, "UP") is False
+
+
+def test_has_crossed_level_down_true_when_spot_below():
+    assert has_crossed_level(23995.0, 24000.0, "DOWN") is True
+
+
+def test_has_crossed_level_down_false_when_spot_above():
+    assert has_crossed_level(24005.0, 24000.0, "DOWN") is False
 
 
 def test_find_nearest_level_picks_closer_of_two():

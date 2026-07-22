@@ -20,6 +20,7 @@ def test_load_with_no_env_vars_uses_safe_defaults(monkeypatch):
     assert config.strike_window_extended == 10
     assert config.greeks_crosscheck_enabled is True
     assert config.expiries_to_fetch == []
+    assert config.zone_merge_threshold_pct == 0.15
 
 
 def test_load_reads_overrides_from_env(monkeypatch):

@@ -42,6 +42,14 @@ class OptionsConfig(BaseModel):
     proximity_mode: str = "pct"  # 'pct' | 'atr'
     atr_multiplier: float = 0.5
     deescalate_threshold_pct: float = 0.40
+    # A price-structure level (swing high/low) and an OI-wall level for
+    # the same side within this % of spot are the same zone (~36 pts on
+    # NIFTY at 24k, matching the alert-staleness-fix spec's 0.15%/0.0015
+    # fraction) -- the OI wall is kept as the trigger, the structure level
+    # is dropped as an independent candidate (attention-only, never a
+    # trigger by itself). Stored as a percentage number (0.15 = 0.15%),
+    # matching every other *_pct field in this file, not as a raw fraction.
+    zone_merge_threshold_pct: float = 0.15
 
     # --- Watch-mode state machine ---
     sustain_minutes: int = 5
@@ -162,6 +170,7 @@ class OptionsConfigLoader:
                 proximity_mode=_env("OPTIONS_PROXIMITY_MODE", "pct"),
                 atr_multiplier=float(_env("OPTIONS_ATR_MULTIPLIER", "0.5")),
                 deescalate_threshold_pct=float(_env("OPTIONS_DEESCALATE_THRESHOLD_PCT", "0.40")),
+                zone_merge_threshold_pct=float(_env("OPTIONS_ZONE_MERGE_THRESHOLD_PCT", "0.15")),
                 sustain_minutes=int(_env("OPTIONS_SUSTAIN_MINUTES", "5")),
                 watch_timeout_minutes=int(_env("OPTIONS_WATCH_TIMEOUT_MINUTES", "45")),
                 volume_confirm_multiplier=float(_env("OPTIONS_VOLUME_CONFIRM_MULTIPLIER", "1.5")),

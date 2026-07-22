@@ -21,10 +21,14 @@ from skills.options_data_fetch import DataInsufficientError
 from skills.options_engine_skill import (
     _fetch_next_weekly_chain_fallback,
     _handle_confirmed,
+    _handle_escalation,
+    _handle_false_breakout,
     acquire_lock,
+    compute_valid_until,
     fetch_cycle_data,
     fetch_first_of_day_snapshot,
     fetch_prior_day_last_snapshot,
+    format_breach_unconfirmed_message,
     format_false_breakout_message,
     format_session_end_message,
     format_session_start_message,
@@ -35,6 +39,8 @@ from skills.options_engine_skill import (
     mark_greeks_sanity_checked,
     notify_session_end,
     notify_session_start,
+    record_alert_sent,
+    refetch_spot_for_alert,
     release_lock,
     run_cycle,
     run_end_of_day,
@@ -254,10 +260,165 @@ def test_format_watch_escalation_message():
     assert "Resistance (price structure): 25260.12" in text
 
 
+def test_format_watch_escalation_message_includes_timestamps_when_provided():
+    analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.1}
+    text = format_watch_escalation_message(
+        25200.0, "UP", 25190.0, analysis,
+        data_ts=datetime(2026, 7, 21, 14, 24, 59, tzinfo=IST),
+        sent_ts=datetime(2026, 7, 21, 14, 25, 3, tzinfo=IST),
+    )
+    assert "Data as of: 14:24:59 IST" in text
+    assert "Sent at: 14:25:03 IST" in text
+
+
+def test_format_watch_escalation_message_omits_timestamps_when_not_provided():
+    analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.1}
+    text = format_watch_escalation_message(25200.0, "UP", 25190.0, analysis)
+    assert "Data as of" not in text
+    assert "Sent at" not in text
+
+
+def test_format_watch_escalation_message_shows_refetch_failed_warning():
+    analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.1}
+    text = format_watch_escalation_message(25200.0, "UP", 25190.0, analysis, spot_refetch_ok=False)
+    assert "spot re-check failed" in text
+
+
+def test_format_breach_unconfirmed_message():
+    analysis = {"regime": "BEARISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 0.8}
+    text = format_breach_unconfirmed_message(24022.2, "DOWN", 24015.0, analysis)
+    assert "LEVEL BREACHED -- AWAITING CONFIRMATION (SUPPORT)" in text
+    assert "already past 24022.2 support" in text
+    assert "bearish breakdown -> PE" in text
+
+
 def test_format_false_breakout_message():
     text = format_false_breakout_message(25200.0, "UP", {"oi_classification": "SHORT_BUILDUP"})
     assert "FALSE BREAKOUT" in text
     assert "SHORT_BUILDUP" in text
+
+
+# --------------------------------------------------------------------------
+# Alert staleness fix: fresh-spot re-check, escalation branching, valid_until
+# --------------------------------------------------------------------------
+
+
+def test_refetch_spot_for_alert_uses_fresh_value():
+    with patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=24016.5):
+        spot, ok = refetch_spot_for_alert(cycle_spot=24023.1)
+    assert spot == 24016.5
+    assert ok is True
+
+
+def test_refetch_spot_for_alert_falls_back_on_failure():
+    with patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=None):
+        spot, ok = refetch_spot_for_alert(cycle_spot=24023.1)
+    assert spot == 24023.1
+    assert ok is False
+
+
+def test_compute_valid_until_watch_mode_is_one_minute():
+    now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=IST)
+    assert compute_valid_until(now, "WATCH") == datetime(2026, 7, 22, 10, 1, 0, tzinfo=IST)
+
+
+def test_compute_valid_until_normal_mode_is_five_minutes():
+    now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=IST)
+    assert compute_valid_until(now, "NORMAL") == datetime(2026, 7, 22, 10, 5, 0, tzinfo=IST)
+
+
+def test_record_alert_sent_persists_row(real_db):
+    record_alert_sent("WATCHING", "UP", 25200.0, "2026-07-22T10:00:00+05:30", datetime(2026, 7, 22, 10, 1, 0, tzinfo=IST))
+
+    from db.database import fetch_one
+
+    row = fetch_one("SELECT alert_type, direction, level, data_ts, valid_until FROM options_alerts_sent")
+    assert row["alert_type"] == "WATCHING"
+    assert row["direction"] == "UP"
+    assert row["level"] == 25200.0
+    assert row["valid_until"] == "2026-07-22T10:01:00+05:30"
+
+
+def test_handle_escalation_sends_watching_when_not_yet_crossed(real_db):
+    next_state = {"watch_level": 25200.0, "watch_direction": "UP"}
+    analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.0}
+    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30"}
+    now = datetime(2026, 7, 22, 10, 0, 5, tzinfo=IST)
+
+    with (
+        patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=25190.0),
+        patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
+        patch("skills.options_engine_skill.notify_breach_unconfirmed") as mock_breach,
+    ):
+        _handle_escalation(next_state, cycle_spot=25185.0, analysis=analysis, cycle_data=cycle_data, now=now)
+
+    mock_watching.assert_called_once()
+    mock_breach.assert_not_called()
+    assert mock_watching.call_args[0][2] == 25190.0  # fresh spot, not the stale cycle spot
+
+    from db.database import fetch_one
+
+    row = fetch_one("SELECT alert_type FROM options_alerts_sent")
+    assert row["alert_type"] == "WATCHING"
+
+
+def test_handle_escalation_sends_breach_unconfirmed_when_already_crossed(real_db):
+    """The exact incident this fix targets: cycle spot (24023.1) hadn't
+    crossed the level, but a fresh re-check shows the market already has."""
+    next_state = {"watch_level": 24022.2, "watch_direction": "DOWN"}
+    analysis = {"regime": "BEARISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 0.9}
+    cycle_data = {"snapshot_ts": "2026-07-21T14:24:59+05:30"}
+    now = datetime(2026, 7, 21, 14, 25, 3, tzinfo=IST)
+
+    with (
+        patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=24015.0),
+        patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
+        patch("skills.options_engine_skill.notify_breach_unconfirmed") as mock_breach,
+    ):
+        _handle_escalation(next_state, cycle_spot=24023.1, analysis=analysis, cycle_data=cycle_data, now=now)
+
+    mock_watching.assert_not_called()
+    mock_breach.assert_called_once()
+    assert mock_breach.call_args[0][2] == 24015.0
+
+    from db.database import fetch_one
+
+    row = fetch_one("SELECT alert_type, level FROM options_alerts_sent")
+    assert row["alert_type"] == "BREACH_UNCONFIRMED"
+    assert row["level"] == 24022.2
+
+
+def test_handle_escalation_passes_refetch_failure_through(real_db):
+    next_state = {"watch_level": 25200.0, "watch_direction": "UP"}
+    analysis = {"regime": "BULLISH", "support_resistance": {}, "oi_levels": {}, "price_levels": {}, "pcr": 1.0}
+    cycle_data = {"snapshot_ts": "2026-07-22T10:00:00+05:30"}
+    now = datetime(2026, 7, 22, 10, 0, 5, tzinfo=IST)
+
+    with (
+        patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=None),
+        patch("skills.options_engine_skill.notify_watch_escalation") as mock_watching,
+    ):
+        _handle_escalation(next_state, cycle_spot=25190.0, analysis=analysis, cycle_data=cycle_data, now=now)
+
+    assert mock_watching.call_args[0][2] == 25190.0  # fell back to cycle spot
+    assert mock_watching.call_args[0][6] is False  # spot_refetch_ok
+
+
+def test_handle_false_breakout_records_alert_sent(real_db):
+    engine_state = {"watch_level": 25200.0, "watch_direction": "UP"}
+    confirmation = {"oi_classification": "SHORT_BUILDUP"}
+    now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=IST)
+
+    with patch("skills.options_engine_skill.notify_false_breakout") as mock_notify:
+        _handle_false_breakout(engine_state, confirmation, now)
+
+    mock_notify.assert_called_once()
+
+    from db.database import fetch_one
+
+    row = fetch_one("SELECT alert_type, valid_until FROM options_alerts_sent")
+    assert row["alert_type"] == "FALSE_BREAKOUT"
+    assert row["valid_until"] == "2026-07-22T10:05:00+05:30"
 
 
 # --------------------------------------------------------------------------
@@ -465,6 +626,7 @@ def test_run_cycle_escalates_when_near_resistance(real_db, tmp_path):
 
     with (
         patch("skills.options_engine_skill.fetch_cycle_data", return_value=cycle_data),
+        patch("skills.options_engine_skill.fetch_nifty_spot_backup", return_value=25191.0),
         patch("skills.options_engine_skill.notify_watch_escalation") as mock_notify,
     ):
         result = run_cycle(config, now)
