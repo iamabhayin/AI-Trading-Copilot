@@ -27,6 +27,7 @@ from skills.options_engine_skill import (
     _handle_false_breakout,
     acquire_lock,
     compute_valid_until,
+    fetch_contract_volume_history,
     fetch_cycle_data,
     fetch_first_of_day_snapshot,
     fetch_prior_day_last_snapshot,
@@ -226,6 +227,32 @@ def test_fetch_first_of_day_snapshot(real_db):
 
     rows = fetch_first_of_day_snapshot("24JUL2025", "2025-07-20")
     assert rows[0]["oi"] == 100
+
+
+def test_fetch_contract_volume_history_oldest_to_newest(real_db):
+    from db.database import execute
+
+    for ts, vol in [("2025-07-20T09:45:00+05:30", 10_000), ("2025-07-20T09:50:00+05:30", 10_500), ("2025-07-20T09:55:00+05:30", 11_500)]:
+        execute(
+            "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, volume) VALUES (?,?,?,?,?,?,?,?)",
+            (ts, "2025-07-20", "24JUL2025", 25200.0, "CE", 1_000_000, 25000.0, vol),
+        )
+
+    history = fetch_contract_volume_history("24JUL2025", 25200.0, "CE", "2025-07-20T09:55:00+05:30")
+    assert history == [10_000, 10_500, 11_500]
+
+
+def test_fetch_contract_volume_history_respects_before_ts(real_db):
+    from db.database import execute
+
+    for ts, vol in [("2025-07-20T09:45:00+05:30", 10_000), ("2025-07-20T10:05:00+05:30", 99_999)]:
+        execute(
+            "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, volume) VALUES (?,?,?,?,?,?,?,?)",
+            (ts, "2025-07-20", "24JUL2025", 25200.0, "CE", 1_000_000, 25000.0, vol),
+        )
+
+    history = fetch_contract_volume_history("24JUL2025", 25200.0, "CE", "2025-07-20T10:00:00+05:30")
+    assert history == [10_000]
 
 
 def test_fetch_prior_day_last_snapshot(real_db):
@@ -793,6 +820,22 @@ def test_run_cycle_confirmed_breakout_writes_and_notifies_advisory(real_db, tmp_
 
     execute(
         "UPDATE option_chain_snapshots SET ltp = 55 WHERE snapshot_ts = '2025-07-20T09:55:00+05:30' AND strike = 25200.0 AND side = 'CE'"
+    )
+    # Real-volume history for the watched contract (25200 CE): confirmation
+    # now comes from the option's own traded volume, not NIFTY-index candle
+    # volume (permanently 0, see check_volume_confirmation's docstring).
+    # Two prior +500 deltas, then a +1000 surge as the "current" reading
+    # (matching cycle_data's own snapshot_ts) -- confirms at multiplier=1.0.
+    execute(
+        "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, volume) VALUES (?,?,?,?,?,?,?,?)",
+        ("2025-07-20T09:45:00+05:30", "2025-07-20", "24JUL2025", 25200.0, "CE", 5_000_000, 25000.0, 10_000),
+    )
+    execute(
+        "UPDATE option_chain_snapshots SET volume = 10500 WHERE snapshot_ts = '2025-07-20T09:55:00+05:30' AND strike = 25200.0 AND side = 'CE'"
+    )
+    execute(
+        "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, volume) VALUES (?,?,?,?,?,?,?,?)",
+        ("2025-07-20T10:00:00+05:30", "2025-07-20", "24JUL2025", 25200.0, "CE", 4_000_000, 25230.0, 11_500),
     )
 
     candles_1m = _wide_candles([25180, 25225, 25230, 25235, 25240, 25245])

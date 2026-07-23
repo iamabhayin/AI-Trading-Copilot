@@ -22,6 +22,7 @@ from config.options_config import OptionsConfig
 from skills.options_analytics import (
     annotate_change_in_oi,
     build_market_analysis,
+    check_option_volume_confirmation,
     check_volume_confirmation,
     classify_chain,
     classify_premium_oi,
@@ -432,6 +433,58 @@ def test_volume_confirmation_does_not_fire_below_multiplier():
 def test_volume_confirmation_insufficient_candles():
     result = check_volume_confirmation(pd.DataFrame({"volume": [1000]}), _config())
     assert result == {"confirmed": False, "current_volume": None, "average_volume": None}
+
+
+def test_volume_confirmation_nifty_index_always_zero_never_confirms():
+    """Documents the actual live bug this was replaced for in the
+    confirmation path: NIFTY the index has no real trade volume (verified
+    live 2026-07-23 -- every candle reports 0), so this can never confirm
+    regardless of how strong the real breakout is."""
+    candles = pd.DataFrame({"volume": [0] * 21})
+    result = check_volume_confirmation(candles, _config(volume_confirm_multiplier=1.5))
+    assert result["confirmed"] is False
+    assert result["average_volume"] == 0.0
+
+
+# --------------------------------------------------------------------------
+# Option-contract volume confirmation (real traded volume, replaces the
+# NIFTY-index-based check above for evaluate_breakout_confirmation --
+# index volume is always 0, see the bug note on check_volume_confirmation)
+# --------------------------------------------------------------------------
+
+
+def test_option_volume_confirmation_fires_above_multiplier():
+    # Cumulative volumes: deltas are 500,500,500 (prior avg=500), then a
+    # surge delta of 900 -- 900 >= 500*1.5=750, confirms.
+    volumes = [10_000, 10_500, 11_000, 11_500, 12_400]
+    result = check_option_volume_confirmation(volumes, _config(volume_confirm_multiplier=1.5))
+    assert result["confirmed"] is True
+    assert result["current_delta"] == 900
+    assert result["average_delta"] == pytest.approx(500.0)
+
+
+def test_option_volume_confirmation_does_not_fire_below_multiplier():
+    volumes = [10_000, 10_500, 11_000, 11_500, 11_900]
+    result = check_option_volume_confirmation(volumes, _config(volume_confirm_multiplier=1.5))
+    assert result["confirmed"] is False
+
+
+def test_option_volume_confirmation_insufficient_history():
+    result = check_option_volume_confirmation([10_000, 10_500], _config())
+    assert result == {"confirmed": False, "current_delta": None, "average_delta": None}
+
+
+def test_option_volume_confirmation_ignores_none_readings():
+    volumes = [None, 10_000, 10_500, 11_000, 11_500, 12_400]
+    result = check_option_volume_confirmation(volumes, _config(volume_confirm_multiplier=1.5))
+    assert result["confirmed"] is True
+
+
+def test_option_volume_confirmation_zero_prior_average_never_confirms():
+    volumes = [10_000, 10_000, 10_000, 10_500]
+    result = check_option_volume_confirmation(volumes, _config(volume_confirm_multiplier=1.5))
+    assert result["confirmed"] is False
+    assert result["average_delta"] == 0.0
 
 
 # --------------------------------------------------------------------------

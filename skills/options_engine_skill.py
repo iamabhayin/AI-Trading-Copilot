@@ -48,6 +48,7 @@ from skills.angel_client import (
 from skills.notify_skill import route_message
 from skills.options_analytics import (
     build_market_analysis,
+    check_option_volume_confirmation,
     compute_atr,
     detect_next_level,
     detect_zone_merge,
@@ -198,6 +199,20 @@ def _fetch_snapshot_rows(expiry_date: str, snapshot_ts: str) -> list[dict]:
         (expiry_date, snapshot_ts),
     )
     return [dict(row) for row in rows]
+
+
+def fetch_contract_volume_history(expiry_date: str, strike: float, side: str, before_ts: str, limit: int = 21) -> list[float | None]:
+    """Recent cumulative-volume readings for one contract, oldest to
+    newest, for check_option_volume_confirmation() -- the real-volume
+    replacement for NIFTY-index-based volume confirmation (which is
+    permanently broken, see check_volume_confirmation's docstring)."""
+    rows = fetch_all(
+        """SELECT volume FROM option_chain_snapshots
+           WHERE expiry_date = ? AND strike = ? AND side = ? AND snapshot_ts <= ?
+           ORDER BY snapshot_ts DESC LIMIT ?""",
+        (expiry_date, strike, side, before_ts, limit),
+    )
+    return [row["volume"] for row in reversed(rows)]
 
 
 def fetch_previous_snapshot(expiry_date: str, trading_date: str, before_ts: str) -> list[dict]:
@@ -807,6 +822,12 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
             watch_level = engine_state["watch_level"]
             direction = engine_state["watch_direction"]
             option_side = "CE" if direction == "UP" else "PE"
+            # NIFTY-index candle volume is permanently 0 (the index itself
+            # is never traded) -- always use the watched contract's own
+            # real traded volume instead, never analysis["volume"] here.
+            volume_history = fetch_contract_volume_history(expiry, watch_level, option_side, cycle_data["snapshot_ts"])
+            volume_result = check_option_volume_confirmation(volume_history, config)
+            analysis["volume"] = volume_result
             confirmation = evaluate_breakout_confirmation(
                 candles=cycle_data["candles_1m"],
                 level=watch_level,
@@ -815,7 +836,7 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
                 option_side=option_side,
                 chain=chain,
                 previous_snapshot=previous_snapshot,
-                volume_result=analysis["volume"],
+                volume_result=volume_result,
                 regime=regime,
                 config=config,
             )

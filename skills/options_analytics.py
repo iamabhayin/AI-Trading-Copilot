@@ -371,7 +371,18 @@ def detect_level_migration(current_levels: dict, previous_levels: dict | None) -
 
 def check_volume_confirmation(candles: pd.DataFrame, config: OptionsConfig, lookback: int = 20) -> dict:
     """Current candle's volume vs the trailing `lookback`-candle rolling
-    average (excluding the current candle itself)."""
+    average (excluding the current candle itself).
+
+    KNOWN BROKEN for NIFTY the index (^NSEI via yfinance): confirmed live
+    2026-07-23 that every single candle reports volume=0 -- the index
+    itself is never traded, only its derivatives are, so there is no such
+    thing as "NIFTY spot volume". Average is therefore always exactly
+    0.0, `average > 0` is always False, and `confirmed` can never be
+    True -- this isn't strictness, it's a permanent, structural dead end.
+    This function stays for any future NIFTY-candle use (and its own
+    tests), but evaluate_breakout_confirmation()'s volume_result must NOT
+    come from here -- see check_option_volume_confirmation() below, which
+    uses the watched contract's own real traded volume instead."""
     if candles is None or len(candles) < 2:
         return {"confirmed": False, "current_volume": None, "average_volume": None}
 
@@ -385,6 +396,33 @@ def check_volume_confirmation(candles: pd.DataFrame, config: OptionsConfig, look
 
     confirmed = average is not None and average > 0 and current >= average * config.volume_confirm_multiplier
     return {"confirmed": confirmed, "current_volume": current, "average_volume": average}
+
+
+def check_option_volume_confirmation(volume_history: list[float | None], config: OptionsConfig) -> dict:
+    """Volume confirmation using the watched level's own option contract
+    -- real traded volume, unlike NIFTY the index (see
+    check_volume_confirmation's docstring for why that path is a
+    permanent dead end). Angel One's tradeVolume is a cumulative running
+    total for the trading day, not a per-interval count, so this compares
+    the volume ADDED in the most recent snapshot interval against the
+    trailing average of prior added-volume deltas -- the options
+    equivalent of "this candle's volume vs the recent average".
+
+    `volume_history` must be ordered oldest to newest (e.g. from
+    options_engine_skill.fetch_contract_volume_history()). Needs at
+    least 3 clean readings: 2 deltas minimum, one to confirm and at least
+    one prior to average against."""
+    clean = [v for v in volume_history if v is not None]
+    if len(clean) < 3:
+        return {"confirmed": False, "current_delta": None, "average_delta": None}
+
+    deltas = [clean[i] - clean[i - 1] for i in range(1, len(clean))]
+    current_delta = deltas[-1]
+    prior_deltas = deltas[:-1]
+    average_delta = sum(prior_deltas) / len(prior_deltas) if prior_deltas else None
+
+    confirmed = average_delta is not None and average_delta > 0 and current_delta >= average_delta * config.volume_confirm_multiplier
+    return {"confirmed": confirmed, "current_delta": current_delta, "average_delta": average_delta}
 
 
 # --------------------------------------------------------------------------
