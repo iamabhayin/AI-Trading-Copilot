@@ -54,6 +54,11 @@ from skills.options_analytics import (
     detect_zone_merge,
     years_to_expiry,
 )
+from skills.options_auto_trader import (
+    force_close_stale_positions,
+    maybe_execute_entry,
+    run_auto_exit_pass,
+)
 from skills.options_data_fetch import (
     DataInsufficientError,
     cleanup_old_snapshots,
@@ -862,6 +867,7 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
             _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analysis, confirmation, spot, atr, regime, now, config, today)
 
         run_position_monitor_pass(analysis, spot, config, today)
+        run_auto_exit_pass(analysis, config, now, today)
 
         return {"status": "ok", "action": action, "regime": regime}
     finally:
@@ -996,6 +1002,7 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
 
     if result["action"] in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
         notify_advisory(payload)
+        maybe_execute_entry(payload, cycle_data["contracts"], config, today)
 
 
 # --------------------------------------------------------------------------
@@ -1074,6 +1081,7 @@ def run_end_of_day(config: OptionsConfig, today: date | None = None) -> dict:
         "UPDATE options_engine_state SET mode = 'NORMAL', watch_level = NULL, watch_direction = NULL, "
         "watch_started_ts = NULL, greeks_sanity_checked_date = NULL, updated_ts = datetime('now') WHERE id = 1"
     )
+    force_close_stale_positions(config, today or datetime.now(IST).date())
     return {"status": "ok", "snapshots_deleted": deleted}
 
 

@@ -135,6 +135,16 @@ class OptionsConfig(BaseModel):
     engine_lock_path: str = "db/.options_engine.lock"
     lock_staleness_seconds: int = 300
 
+    # --- Auto-trading (Phase 17): BUY CE/PE only, real AngelOne orders.
+    # Every field here defaults to the safe/off state -- this is real-money
+    # automation and must be explicitly opted into, same precedent as
+    # config/settings.py's enable_risk_regime_bias. ---
+    auto_trading_enabled: bool = False
+    auto_trading_dry_run: bool = True
+    auto_trading_budget_per_trade: float = 15000.0
+    auto_trading_max_trades_per_day: int = 2
+    auto_trading_squareoff_time: str = "15:15"
+
     @classmethod
     def load(cls) -> "OptionsConfig":
         return OptionsConfigLoader().load()
@@ -228,6 +238,15 @@ class OptionsConfigLoader:
                 expiries_to_fetch=OptionsConfig._split_csv(_env("OPTIONS_EXPIRIES_TO_FETCH", "")),
                 engine_lock_path=_env("OPTIONS_ENGINE_LOCK_PATH", "db/.options_engine.lock"),
                 lock_staleness_seconds=int(_env("OPTIONS_LOCK_STALENESS_SECONDS", "300")),
+                auto_trading_enabled=OptionsConfig._parse_bool(
+                    _env("OPTIONS_AUTO_TRADING_ENABLED", "false")
+                ),
+                auto_trading_dry_run=OptionsConfig._parse_bool(
+                    _env("OPTIONS_AUTO_TRADING_DRY_RUN", "true")
+                ),
+                auto_trading_budget_per_trade=float(_env("OPTIONS_AUTO_TRADING_BUDGET_PER_TRADE", "15000")),
+                auto_trading_max_trades_per_day=int(_env("OPTIONS_AUTO_TRADING_MAX_TRADES_PER_DAY", "2")),
+                auto_trading_squareoff_time=_env("OPTIONS_AUTO_TRADING_SQUAREOFF_TIME", "15:15"),
             )
         except (ValidationError, ValueError) as exc:
             raise OptionsConfigError(f"Invalid Option Trading configuration: {exc}") from exc

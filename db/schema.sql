@@ -157,8 +157,41 @@ CREATE TABLE IF NOT EXISTS options_alerts_sent (
     valid_until TEXT NOT NULL
 );
 
+-- Broker-executed automated trades (Phase 17 auto-trading). Deliberately
+-- separate from options_positions above: that table is populated by a human
+-- replying to a Discord alert (options_position_entry.py) and has no notion
+-- of a broker order id, symboltoken, or dry-run simulation. Keeping this
+-- table distinct means the manual advisory/confirmation flow is untouched.
+CREATE TABLE IF NOT EXISTS auto_options_positions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    status            TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    trade_date        TEXT NOT NULL,
+    contract          TEXT NOT NULL,
+    tradingsymbol     TEXT NOT NULL,
+    symboltoken       TEXT NOT NULL,
+    expiry_date       TEXT NOT NULL,
+    strike            REAL NOT NULL,
+    side              TEXT NOT NULL CHECK (side IN ('CE', 'PE')),
+    qty_lots          INTEGER NOT NULL,
+    lot_size          INTEGER NOT NULL,
+    dry_run           INTEGER NOT NULL DEFAULT 1,
+    entry_order_id    TEXT,
+    entry_premium     REAL,
+    entry_spot        REAL,
+    option_stop       REAL NOT NULL,
+    target_1          REAL NOT NULL,
+    trend_label       TEXT,
+    opened_ts         TEXT NOT NULL DEFAULT (datetime('now')),
+    exit_order_id     TEXT,
+    exit_premium      REAL,
+    exit_reason       TEXT CHECK (exit_reason IN ('TARGET_HIT', 'SL_HIT', 'FORCED_SQUAREOFF')),
+    realized_pnl      REAL,
+    closed_ts         TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (trading_date, expiry_date, strike, side);
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ts ON option_chain_snapshots (snapshot_ts);
 CREATE INDEX IF NOT EXISTS idx_options_advisories_created ON options_advisories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_options_positions_status ON options_positions (status);
 CREATE INDEX IF NOT EXISTS idx_options_alerts_sent_ts ON options_alerts_sent (sent_ts);
+CREATE INDEX IF NOT EXISTS idx_auto_options_positions_trade_date ON auto_options_positions (trade_date, status);
