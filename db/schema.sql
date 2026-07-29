@@ -141,7 +141,24 @@ CREATE TABLE IF NOT EXISTS options_positions (
     last_notified_state TEXT
 );
 
+-- Every WATCH-mode notification the engine sends (escalation/watching,
+-- breach-unconfirmed, false breakout) -- separate from options_advisories
+-- (which only persists CONFIRMED-stage trade decisions). Exists for
+-- staleness tracking: valid_until is the next scheduled scan time, so a
+-- reader (or a future dedup/cleanup pass) can tell whether an alert is
+-- still current without re-deriving cadence rules.
+CREATE TABLE IF NOT EXISTS options_alerts_sent (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_ts     TEXT NOT NULL,
+    alert_type  TEXT NOT NULL CHECK (alert_type IN ('WATCHING', 'BREACH_UNCONFIRMED', 'FALSE_BREAKOUT')),
+    direction   TEXT CHECK (direction IN ('UP', 'DOWN')),
+    level       REAL,
+    data_ts     TEXT,
+    valid_until TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (trading_date, expiry_date, strike, side);
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ts ON option_chain_snapshots (snapshot_ts);
 CREATE INDEX IF NOT EXISTS idx_options_advisories_created ON options_advisories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_options_positions_status ON options_positions (status);
+CREATE INDEX IF NOT EXISTS idx_options_alerts_sent_ts ON options_alerts_sent (sent_ts);

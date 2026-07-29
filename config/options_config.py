@@ -42,6 +42,14 @@ class OptionsConfig(BaseModel):
     proximity_mode: str = "pct"  # 'pct' | 'atr'
     atr_multiplier: float = 0.5
     deescalate_threshold_pct: float = 0.40
+    # A price-structure level (swing high/low) and an OI-wall level for
+    # the same side within this % of spot are the same zone (~36 pts on
+    # NIFTY at 24k, matching the alert-staleness-fix spec's 0.15%/0.0015
+    # fraction) -- the OI wall is kept as the trigger, the structure level
+    # is dropped as an independent candidate (attention-only, never a
+    # trigger by itself). Stored as a percentage number (0.15 = 0.15%),
+    # matching every other *_pct field in this file, not as a raw fraction.
+    zone_merge_threshold_pct: float = 0.15
 
     # --- Watch-mode state machine ---
     sustain_minutes: int = 5
@@ -52,6 +60,11 @@ class OptionsConfig(BaseModel):
     boundary_min_share: float = 0.20
     strike_window_primary: int = 5
     strike_window_extended: int = 10
+    # Minimum share of total beyond-the-wall OI (same side) a single
+    # strike must hold to be shown as a "next level" in alerts -- purely
+    # informational/display, never a trade trigger. Same style as
+    # boundary_min_share (a 0-1 fraction, not a percentage number).
+    next_level_min_share: float = 0.15
     greeks_crosscheck_enabled: bool = True
     # Minimum |% move| in premium/OI to count as a real signal rather than
     # noise, when classifying LONG_BUILDUP/SHORT_BUILDUP/SHORT_COVERING/
@@ -62,6 +75,11 @@ class OptionsConfig(BaseModel):
     # |recomputed - broker| delta divergence above this logs a warning —
     # informational only, never blocks (rulebook implementation notes).
     greeks_divergence_threshold: float = 0.15
+    # Number of trailing premium snapshots that must hold beyond the prior
+    # premium range for check_premium_breakout() to confirm the watched
+    # contract's OWN premium chart broke out, not just the underlying
+    # (2026-07-28 confirmation-framework addition to Sections 32/33).
+    premium_confirm_sustain_count: int = 2
 
     # --- Scoring (rulebook Section 43 weights) ---
     min_score: int = 70
@@ -162,10 +180,12 @@ class OptionsConfigLoader:
                 proximity_mode=_env("OPTIONS_PROXIMITY_MODE", "pct"),
                 atr_multiplier=float(_env("OPTIONS_ATR_MULTIPLIER", "0.5")),
                 deescalate_threshold_pct=float(_env("OPTIONS_DEESCALATE_THRESHOLD_PCT", "0.40")),
+                zone_merge_threshold_pct=float(_env("OPTIONS_ZONE_MERGE_THRESHOLD_PCT", "0.15")),
                 sustain_minutes=int(_env("OPTIONS_SUSTAIN_MINUTES", "5")),
                 watch_timeout_minutes=int(_env("OPTIONS_WATCH_TIMEOUT_MINUTES", "45")),
                 volume_confirm_multiplier=float(_env("OPTIONS_VOLUME_CONFIRM_MULTIPLIER", "1.5")),
                 boundary_min_share=float(_env("OPTIONS_BOUNDARY_MIN_SHARE", "0.20")),
+                next_level_min_share=float(_env("OPTIONS_NEXT_LEVEL_MIN_SHARE", "0.15")),
                 strike_window_primary=int(_env("OPTIONS_STRIKE_WINDOW_PRIMARY", "5")),
                 strike_window_extended=int(_env("OPTIONS_STRIKE_WINDOW_EXTENDED", "10")),
                 greeks_crosscheck_enabled=OptionsConfig._parse_bool(
@@ -174,6 +194,7 @@ class OptionsConfigLoader:
                 classification_min_move_pct=float(_env("OPTIONS_CLASSIFICATION_MIN_MOVE_PCT", "2.0")),
                 risk_free_rate=float(_env("OPTIONS_RISK_FREE_RATE", "0.065")),
                 greeks_divergence_threshold=float(_env("OPTIONS_GREEKS_DIVERGENCE_THRESHOLD", "0.15")),
+                premium_confirm_sustain_count=int(_env("OPTIONS_PREMIUM_CONFIRM_SUSTAIN_COUNT", "2")),
                 min_score=int(_env("OPTIONS_MIN_SCORE", "70")),
                 score_weight_trend_pa=int(_env("OPTIONS_SCORE_WEIGHT_TREND_PA", "20")),
                 score_weight_confirmation=int(_env("OPTIONS_SCORE_WEIGHT_CONFIRMATION", "20")),

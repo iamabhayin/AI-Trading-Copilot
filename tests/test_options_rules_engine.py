@@ -17,7 +17,9 @@ import pytest
 
 from config.options_config import OptionsConfig
 from skills.options_rules_engine import (
+    build_trade_checklist,
     check_level_strike_oi_behavior,
+    check_premium_breakout,
     check_proximity,
     check_retest_hold,
     check_sustain,
@@ -28,6 +30,7 @@ from skills.options_rules_engine import (
     evaluate_breakout_confirmation,
     evaluate_market_rejections,
     find_nearest_level,
+    has_crossed_level,
     score_confirmation,
     score_delta_oi,
     score_iv_greeks,
@@ -133,6 +136,26 @@ def test_check_proximity_atr_mode():
 def test_check_proximity_atr_mode_missing_atr_returns_false():
     config = _config(proximity_mode="atr", atr_multiplier=0.5)
     assert check_proximity(25190.0, 25200.0, config, atr=None) is False
+
+
+def test_has_crossed_level_up_true_when_spot_above():
+    assert has_crossed_level(24205.0, 24200.0, "UP") is True
+
+
+def test_has_crossed_level_up_false_when_spot_below():
+    assert has_crossed_level(24195.0, 24200.0, "UP") is False
+
+
+def test_has_crossed_level_up_false_when_spot_equals_level():
+    assert has_crossed_level(24200.0, 24200.0, "UP") is False
+
+
+def test_has_crossed_level_down_true_when_spot_below():
+    assert has_crossed_level(23995.0, 24000.0, "DOWN") is True
+
+
+def test_has_crossed_level_down_false_when_spot_above():
+    assert has_crossed_level(24005.0, 24000.0, "DOWN") is False
 
 
 def test_find_nearest_level_picks_closer_of_two():
@@ -334,6 +357,33 @@ def test_check_retest_hold_returns_none_when_no_touch():
 
 
 # --------------------------------------------------------------------------
+# Premium-chart breakout confirmation (2026-07-28 addition -- "underlying
+# gives direction, option premium confirms execution")
+# --------------------------------------------------------------------------
+
+
+def test_check_premium_breakout_confirms_on_sustained_rise():
+    # prior range tops out at 55; last 2 readings both close above it.
+    assert check_premium_breakout([35, 45, 55, 50, 60, 62], "UP", sustain_count=2) is True
+
+
+def test_check_premium_breakout_fails_when_premium_lags():
+    # underlying broke out but this contract's own premium never cleared
+    # its prior high of 55 -- rulebook Section 8's "wait" example.
+    assert check_premium_breakout([35, 45, 55, 50, 53, 51], "UP", sustain_count=2) is False
+
+
+def test_check_premium_breakout_confirms_on_sustained_fall_for_pe():
+    assert check_premium_breakout([90, 70, 65, 60, 58, 55], "DOWN", sustain_count=2) is True
+
+
+def test_check_premium_breakout_none_when_insufficient_history():
+    assert check_premium_breakout([50, 55], "UP", sustain_count=2) is None
+    assert check_premium_breakout(None, "UP", sustain_count=2) is None
+    assert check_premium_breakout([], "UP", sustain_count=2) is None
+
+
+# --------------------------------------------------------------------------
 # Level-strike OI behavior
 # --------------------------------------------------------------------------
 
@@ -448,6 +498,84 @@ def test_section_27_false_breakdown_support_defended():
     assert result["confirmed"] is False
     assert result["false_breakout"] is True
     assert result["oi_classification"] == "SHORT_BUILDUP"
+
+
+def test_evaluate_breakout_confirmation_reports_opposite_side_writing():
+    """2026-07-28 addition: PE OI at the resistance strike showing fresh
+    writing (premium down, OI up) surfaces as `opposite_oi_classification`
+    -- informational only, doesn't affect `confirmed`."""
+    candles = _wide_candles([25180, 25225, 25230, 25235, 25240, 25245])
+    chain = [
+        {"strike": 25200.0, "side": "CE", "ltp": 75, "oi": 4_000_000},
+        {"strike": 25200.0, "side": "PE", "ltp": 60, "oi": 3_500_000},
+    ]
+    previous = [
+        {"strike": 25200.0, "side": "CE", "ltp": 55, "oi": 5_500_000},
+        {"strike": 25200.0, "side": "PE", "ltp": 70, "oi": 3_000_000},
+    ]
+    config = _config()
+
+    result = evaluate_breakout_confirmation(
+        candles=candles, level=25200.0, direction="UP", level_strike=25200.0, option_side="CE",
+        chain=chain, previous_snapshot=previous, volume_result={"confirmed": True}, regime="BULLISH", config=config,
+    )
+
+    assert result["opposite_oi_classification"] == "SHORT_BUILDUP"
+    assert result["confirmed"] is True
+
+
+def test_evaluate_breakout_confirmation_blocked_by_lagging_premium():
+    """Otherwise-identical to test_section_22_bullish_breakout_confirmed,
+    but the watched contract's own premium never cleared its own prior
+    high -- 2026-07-28 confirmation-framework addition: underlying
+    breakout alone must not be enough."""
+    candles = _wide_candles([25180, 25225, 25230, 25235, 25240, 25245])
+    chain = [{"strike": 25200.0, "side": "CE", "ltp": 75, "oi": 4_000_000}]
+    previous = [{"strike": 25200.0, "side": "CE", "ltp": 55, "oi": 5_500_000}]
+    config = _config()
+
+    result = evaluate_breakout_confirmation(
+        candles=candles,
+        level=25200.0,
+        direction="UP",
+        level_strike=25200.0,
+        option_side="CE",
+        chain=chain,
+        previous_snapshot=previous,
+        volume_result={"confirmed": True},
+        regime="BULLISH",
+        config=config,
+        premium_history=[35, 45, 55, 50, 53, 51],
+    )
+
+    assert result["premium_confirms"] is False
+    assert result["confirmed"] is False
+
+
+def test_evaluate_breakout_confirmation_missing_premium_history_does_not_block():
+    """No premium_history supplied (e.g. a fresh WATCH with < 3 snapshots
+    so far) must not block confirmation -- absence is "not applicable",
+    same precedent as check_retest_hold's None."""
+    candles = _wide_candles([25180, 25225, 25230, 25235, 25240, 25245])
+    chain = [{"strike": 25200.0, "side": "CE", "ltp": 75, "oi": 4_000_000}]
+    previous = [{"strike": 25200.0, "side": "CE", "ltp": 55, "oi": 5_500_000}]
+    config = _config()
+
+    result = evaluate_breakout_confirmation(
+        candles=candles,
+        level=25200.0,
+        direction="UP",
+        level_strike=25200.0,
+        option_side="CE",
+        chain=chain,
+        previous_snapshot=previous,
+        volume_result={"confirmed": True},
+        regime="BULLISH",
+        config=config,
+    )
+
+    assert result["premium_confirms"] is None
+    assert result["confirmed"] is True
 
 
 # --------------------------------------------------------------------------
@@ -576,5 +704,93 @@ def test_summarize_confirmation_evidence_short_buildup_and_failed_retest():
     assert "Retest of the level failed" in reasons
 
 
+def test_summarize_confirmation_evidence_premium_confirms():
+    assert "Option premium broke its own range and sustained" in summarize_confirmation_evidence(
+        {"premium_confirms": True}
+    )
+    assert "Option premium has NOT confirmed the underlying move" in summarize_confirmation_evidence(
+        {"premium_confirms": False}
+    )
+    assert summarize_confirmation_evidence({"premium_confirms": None}) == []
+
+
 def test_summarize_confirmation_evidence_empty():
     assert summarize_confirmation_evidence({}) == []
+
+
+# --------------------------------------------------------------------------
+# Trade checklist (2026-07-28 request -- the user's own 9-line CE/PE
+# confirmation-framework wording, e.g. "Trend -> Bullish", "Call
+# unwinding", "Put writing", ... rendered in the BUY advisory message)
+# --------------------------------------------------------------------------
+
+
+def _full_confirmation() -> dict:
+    return {
+        "crossed": True, "sustained": True, "volume_confirmed": True,
+        "oi_classification": "SHORT_COVERING", "opposite_oi_classification": "SHORT_BUILDUP",
+        "premium_confirms": True,
+    }
+
+
+def test_build_trade_checklist_bullish_matches_user_example():
+    trade = {"moneyness": "ATM", "risk_reward": 2.5}
+    checklist = build_trade_checklist(_full_confirmation(), "BULLISH", "CE", trade, iv_acceptable=True, min_rr=2.0)
+    assert checklist == [
+        ("Trend", "Bullish", True),
+        ("Resistance breakout", None, True),
+        ("Volume", "Above average", True),
+        ("Call unwinding", None, True),
+        ("Put writing", None, True),
+        ("Premium resistance breakout", None, True),
+        ("ATM/ITM strike", None, True),
+        ("IV acceptable", None, True),
+        ("Risk:Reward ≥ 1:2", None, True),
+    ]
+
+
+def test_build_trade_checklist_bearish_matches_user_example():
+    trade = {"moneyness": "ITM", "risk_reward": 2.2}
+    checklist = build_trade_checklist(_full_confirmation(), "BEARISH", "PE", trade, iv_acceptable=True, min_rr=2.0)
+    assert checklist == [
+        ("Trend", "Bearish", True),
+        ("Support breakdown", None, True),
+        ("Volume", "Strong", True),
+        ("Put unwinding", None, True),
+        ("Call writing", None, True),
+        ("PE premium breakout", None, True),
+        ("ATM/ITM PE", None, True),
+        ("IV acceptable", None, True),
+        ("Risk:Reward ≥ 1:2", None, True),
+    ]
+
+
+def test_build_trade_checklist_flags_unmet_writing_and_iv():
+    """Put/Call writing and IV acceptable are informational, not gating --
+    they can legitimately read unmet (not just pending) even on a
+    delivered BUY message, when the opposite side was actually evaluated
+    and did NOT show writing."""
+    confirmation = {**_full_confirmation(), "opposite_oi_classification": "LONG_UNWINDING"}
+    trade = {"moneyness": "ATM", "risk_reward": 2.5}
+    checklist = build_trade_checklist(confirmation, "BULLISH", "CE", trade, iv_acceptable=False, min_rr=2.0)
+    by_label = {label: met for label, _, met in checklist}
+    assert by_label["Put writing"] is False
+    assert by_label["IV acceptable"] is False
+
+
+def test_build_trade_checklist_writing_pending_when_opposite_side_data_missing():
+    """When the opposite side's row simply wasn't in the fetched chain
+    (data missing, not evaluated), the row must read pending (⏳), not a
+    false "not met" -- absence of data is not evidence against it."""
+    confirmation = {**_full_confirmation(), "opposite_oi_classification": None}
+    trade = {"moneyness": "ATM", "risk_reward": 2.5}
+    checklist = build_trade_checklist(confirmation, "BULLISH", "CE", trade, iv_acceptable=True, min_rr=2.0)
+    by_label = {label: met for label, _, met in checklist}
+    assert by_label["Put writing"] is None
+
+
+def test_build_trade_checklist_risk_reward_below_min_fails():
+    trade = {"moneyness": "ATM", "risk_reward": 1.5}
+    checklist = build_trade_checklist(_full_confirmation(), "BULLISH", "CE", trade, iv_acceptable=True, min_rr=2.0)
+    by_label = {label: met for label, _, met in checklist}
+    assert by_label["Risk:Reward ≥ 1:2"] is False

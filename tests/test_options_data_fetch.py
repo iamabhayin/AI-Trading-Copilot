@@ -17,6 +17,7 @@ from skills.options_data_fetch import (
     check_spot_divergence,
     cleanup_old_snapshots,
     fetch_india_vix,
+    fetch_india_vix_with_change,
     fetch_nifty_spot_backup,
 )
 
@@ -64,6 +65,27 @@ def test_fetch_india_vix_returns_latest_close():
 def test_fetch_india_vix_handles_fetch_failure():
     with patch("skills.options_data_fetch.fetch_ohlcv", side_effect=ValueError("no data")):
         assert fetch_india_vix() is None
+
+
+def test_fetch_india_vix_with_change_computes_day_change():
+    df = pd.DataFrame({"close": [13.2, 13.5, 13.8]})
+
+    with patch("skills.options_data_fetch.fetch_ohlcv", return_value=df):
+        result = fetch_india_vix_with_change()
+
+    assert result == {"latest": 13.8, "change": pytest.approx(0.3)}
+
+
+def test_fetch_india_vix_with_change_insufficient_history_returns_none():
+    df = pd.DataFrame({"close": [13.8]})
+
+    with patch("skills.options_data_fetch.fetch_ohlcv", return_value=df):
+        assert fetch_india_vix_with_change() is None
+
+
+def test_fetch_india_vix_with_change_handles_fetch_failure():
+    with patch("skills.options_data_fetch.fetch_ohlcv", side_effect=ValueError("no data")):
+        assert fetch_india_vix_with_change() is None
 
 
 def test_check_spot_divergence_within_threshold():

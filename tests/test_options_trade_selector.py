@@ -324,6 +324,12 @@ def test_evaluate_trade_rejections_clean_trade_no_reasons():
     assert evaluate_trade_rejections(trade, config) == []
 
 
+def test_evaluate_trade_rejections_theta_danger():
+    config = _config()
+    trade = {"theta_danger": True}
+    assert "theta danger: too close to expiry for fresh directional buying" in evaluate_trade_rejections(trade, config)
+
+
 # --------------------------------------------------------------------------
 # Scoring sub-scores (rr, liquidity)
 # --------------------------------------------------------------------------
@@ -388,6 +394,11 @@ def test_select_trade_buy_ce_candidate_happy_path():
     assert result["action"] == "BUY_CE_CANDIDATE"
     assert result["trade"]["strike"] == 25200.0
     assert result["trade"]["position_size_lots"] > 0
+    # Both T1 and T2 must carry a modeled option premium alongside the
+    # underlying level -- the trader executes on premium, not spot.
+    assert result["trade"]["target_premium_1"] is not None
+    assert result["trade"]["target_premium_2"] is not None
+    assert result["trade"]["target_premium_2"] > result["trade"]["target_premium_1"]
 
 
 def test_select_trade_no_trade_when_no_strike_available():
@@ -399,6 +410,39 @@ def test_select_trade_no_trade_when_no_strike_available():
     )
     assert result["action"] == "NO_TRADE"
     assert "no listed expiries available" in result["reasons"] or "no liquid ATM/slightly-ITM strike available" in result["reasons"]
+
+
+def test_select_trade_no_trade_due_to_theta_danger():
+    """Same setup as the happy-path test, but `today` is only 2 days from
+    the nearest suitable expiry -- inside theta_danger_days (default 3)
+    even though holding_fit_multiplier=1.0 lets select_expiry accept it
+    (no next level beyond 25200 here, so estimated holding is just 1 day).
+    2026-07-28 confirmation-framework addition: theta is a hard pre-entry
+    gate, not just a post-entry position-monitor concern."""
+    config = _config(
+        delta_band_min=0.50, delta_band_max=0.70, max_spread_pct=5.0, min_oi=0, min_volume=0,
+        holding_fit_multiplier=1.0, min_rr=1.0, risk_pct=0.5, entry_zone_buffer_pct=0.10, invalidation_buffer_pct=0.30,
+    )
+    expiry_chain = [_chain_row(strike=25200.0, side="CE", delta=0.60, ltp=140.0, bid=139.0, ask=141.0)]
+    contracts = _contracts()
+    support_resistance = {"support": [24800.0], "resistance": [25200.0]}
+
+    result = select_trade(
+        direction="UP",
+        confirmation_level=25200.0,
+        option_side="CE",
+        expiry_chain=expiry_chain,
+        contracts=contracts,
+        entry_spot=25230.0,
+        support_resistance=support_resistance,
+        atr=50.0,
+        capital=5_000_000,
+        config=config,
+        today=date(2025, 7, 22),
+    )
+
+    assert result["action"] == "NO_TRADE"
+    assert "theta danger: too close to expiry for fresh directional buying" in result["reasons"]
 
 
 def test_select_trade_no_trade_zero_capital_gives_zero_lots():
@@ -435,10 +479,12 @@ def test_build_advisory_payload_includes_trade_fields():
     assert payload["strike"] == 25200.0
     assert payload["lot_size"] == 75
     assert payload["action"] == "BUY_CE_CANDIDATE"
+    # `why` is still persisted (DB audit trail) even though the 2026-07-28
+    # checklist rewrite replaced it in the human-facing message.
     assert payload["why"] == ["Price crossed the level", "Volume confirmed the move"]
 
     message = format_advisory_message(payload)
-    assert "Volume confirmed the move" in message
+    assert "Volume confirmed the move" not in message
 
 
 def test_build_advisory_payload_no_trade_includes_reasons():
@@ -496,10 +542,150 @@ def test_format_advisory_message_is_always_the_deterministic_template():
         "position_size_lots": 7, "confidence": 85, "data_timestamp": "2025-07-20T10:00:00+05:30",
     }
     message = format_advisory_message(payload)
-    assert "BUY_CE_CANDIDATE" in message
+    assert "BUY CALL (CE)" in message
     assert "25200" in message
-    assert "104" in message  # option stop
-    assert "25400" in message  # target 2
+    assert "104.00" in message  # option stop (rounded, not raw float)
+    assert "25,400.00" in message  # target 2
     assert "7 lot" in message  # position size
     assert "85/100" in message  # confidence
     assert "2025-07-20T10:00:00+05:30" in message  # data timestamp
+
+
+def test_format_advisory_message_shows_premium_targets_and_min_rr():
+    """2026-07-28 precision improvement: the trader executes on premium,
+    not spot -- T1/T2 must show the modeled option premium (in rupees)
+    alongside the underlying level, and R:R must state the configured
+    minimum for context, not just a bare ratio."""
+    payload = {
+        "action": "BUY_CE_CANDIDATE", "strike": 25200.0, "side": "CE", "moneyness": "ATM",
+        "expiry": "24JUL2025", "entry_zone": (25200.0, 25225.2), "underlying_invalidation": 25124.4,
+        "option_stop": 104.0, "entry_premium": 140.0,
+        "target_1": 25320.0, "target_2": 25400.0,
+        "target_premium_1": 185.0, "target_premium_2": 230.0,
+        "risk_reward": 2.5, "min_rr": 2.0,
+        "position_size_lots": 7, "lot_size": 75, "confidence": 85,
+        "data_timestamp": "2025-07-20T10:00:00+05:30",
+    }
+    message = format_advisory_message(payload)
+    assert "Rs 185.00" in message  # T1 option premium
+    assert "Rs 230.00" in message  # T2 option premium
+    assert "Rs 140.00" in message  # entry premium
+    assert "(+32.1%)" in message  # T1 premium gain vs entry
+    assert "1 : 2.50  (min required 1 : 2.00)" in message
+    assert "7 lot(s) (525 qty)" in message  # position size with actual quantity
+
+
+def test_format_advisory_message_rounds_float_noise():
+    """A financial advisory must never leak raw float arithmetic noise
+    (e.g. 25320.199999999997 from delta-mapped target estimation) --
+    every number is explicitly rounded to 2 decimals."""
+    payload = {
+        "action": "BUY_PE_CANDIDATE", "strike": 24800.0, "side": "PE", "moneyness": "ATM",
+        "expiry": "24JUL2025", "entry_zone": (24799.999999999996, 24810.0), "underlying_invalidation": 24875.30000000001,
+        "option_stop": 79.51999999999998, "entry_premium": 140.0,
+        "target_1": None, "target_2": 24600.10000000001,
+        "target_premium_1": None, "target_premium_2": 200.00000000002,
+        "risk_reward": 2.333333333333333, "position_size_lots": 5, "lot_size": 75,
+        "confidence": 80, "data_timestamp": "2025-07-20T10:00:00+05:30",
+    }
+    message = format_advisory_message(payload)
+    assert "9999999" not in message
+    assert "0000000" not in message
+    assert "333333" not in message
+    assert "T1: n/a (no next level detected)" in message
+
+
+def test_format_advisory_message_renders_bullish_checklist_verbatim():
+    """2026-07-28 request: replace the old free-text WHY bullets with the
+    user's own exact 9-line CE checklist wording."""
+    payload = {
+        "action": "BUY_CE_CANDIDATE", "strike": 25200.0, "side": "CE", "moneyness": "ATM",
+        "expiry": "24JUL2025", "entry_zone": (25200.0, 25225.2), "underlying_invalidation": 25124.4,
+        "option_stop": 104.0, "entry_premium": 140.0,
+        "target_1": 25320.0, "target_2": 25400.0,
+        "risk_reward": 2.5, "position_size_lots": 7, "lot_size": 75, "confidence": 85,
+        "data_timestamp": "2025-07-20T10:00:00+05:30",
+        "checklist": [
+            ("Trend", "Bullish", True),
+            ("Resistance breakout", None, True),
+            ("Volume", "Above average", True),
+            ("Call unwinding", None, True),
+            ("Put writing", None, True),
+            ("Premium resistance breakout", None, True),
+            ("ATM/ITM strike", None, True),
+            ("IV acceptable", None, True),
+            ("Risk:Reward ≥ 1:2", None, True),
+        ],
+    }
+    message = format_advisory_message(payload)
+    expected_lines = [
+        "Trend → Bullish ✔",
+        "Resistance breakout → ✔",
+        "Volume → Above average ✔",
+        "Call unwinding → ✔",
+        "Put writing → ✔",
+        "Premium resistance breakout → ✔",
+        "ATM/ITM strike → ✔",
+        "IV acceptable → ✔",
+        "Risk:Reward ≥ 1:2 → ✔",
+    ]
+    for line in expected_lines:
+        assert line in message
+    assert "Why this breakout" not in message
+
+
+def test_format_advisory_message_renders_bearish_checklist_verbatim():
+    """PUT-side mirror of the same request."""
+    payload = {
+        "action": "BUY_PE_CANDIDATE", "strike": 24800.0, "side": "PE", "moneyness": "ATM",
+        "expiry": "24JUL2025", "entry_zone": (24790.0, 24800.0), "underlying_invalidation": 24875.4,
+        "option_stop": 60.0, "entry_premium": 90.0,
+        "target_1": 24700.0, "target_2": 24600.0,
+        "risk_reward": 2.2, "position_size_lots": 5, "lot_size": 75, "confidence": 80,
+        "data_timestamp": "2025-07-20T10:00:00+05:30",
+        "checklist": [
+            ("Trend", "Bearish", True),
+            ("Support breakdown", None, True),
+            ("Volume", "Strong", True),
+            ("Put unwinding", None, True),
+            ("Call writing", None, True),
+            ("PE premium breakout", None, True),
+            ("ATM/ITM PE", None, True),
+            ("IV acceptable", None, True),
+            ("Risk:Reward ≥ 1:2", None, True),
+        ],
+    }
+    message = format_advisory_message(payload)
+    expected_lines = [
+        "Trend → Bearish ✔",
+        "Support breakdown → ✔",
+        "Volume → Strong ✔",
+        "Put unwinding → ✔",
+        "Call writing → ✔",
+        "PE premium breakout → ✔",
+        "ATM/ITM PE → ✔",
+        "IV acceptable → ✔",
+        "Risk:Reward ≥ 1:2 → ✔",
+    ]
+    for line in expected_lines:
+        assert line in message
+
+
+def test_format_advisory_message_checklist_shows_unmet_marker():
+    payload = {
+        "action": "BUY_CE_CANDIDATE", "strike": 25200.0, "side": "CE", "moneyness": "ATM",
+        "expiry": "24JUL2025", "entry_zone": (25200.0, 25225.2), "underlying_invalidation": 25124.4,
+        "option_stop": 104.0, "entry_premium": 140.0, "target_1": None, "target_2": None,
+        "risk_reward": 2.5, "position_size_lots": 7, "lot_size": 75, "confidence": 85,
+        "data_timestamp": "2025-07-20T10:00:00+05:30",
+        "checklist": [("Put writing", None, False)],
+    }
+    message = format_advisory_message(payload)
+    assert "Put writing → ✘" in message
+
+
+def test_format_advisory_message_no_trade_lists_reasons_as_bullets():
+    payload = {"action": "NO_TRADE", "reasons": ["risk:reward below threshold", "poor liquidity"], "confidence": 40, "data_timestamp": "2025-07-20T10:00:00+05:30"}
+    message = format_advisory_message(payload)
+    assert "- risk:reward below threshold" in message
+    assert "- poor liquidity" in message

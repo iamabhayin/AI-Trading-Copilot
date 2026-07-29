@@ -249,6 +249,33 @@ def detect_oi_support_resistance(chain: list[dict], top_n: int = 1) -> dict:
     }
 
 
+def detect_next_level(chain: list[dict], side: str, beyond_level: float, direction: str, config: OptionsConfig) -> float | None:
+    """Next OI concentration beyond the current wall, same option side --
+    e.g. the next PE-OI cluster below a support wall, shown in alerts as
+    a forward-looking target if the wall breaks (Part B). Purely
+    informational/display, never a trade trigger: requires the strongest
+    beyond-the-wall strike to hold at least config.next_level_min_share of
+    the total OI out there, so a negligible strike isn't flagged as a
+    meaningful level. 'Beyond' means further from spot in the breakout
+    direction -- lower strikes for a support/DOWN wall, higher strikes for
+    a resistance/UP wall."""
+    beyond_rows = [
+        row
+        for row in chain
+        if row["side"] == side and (row["strike"] < beyond_level if direction == "DOWN" else row["strike"] > beyond_level)
+    ]
+    if not beyond_rows:
+        return None
+    total_oi = sum(row.get("oi") or 0 for row in beyond_rows)
+    if total_oi <= 0:
+        return None
+    best = max(beyond_rows, key=lambda r: r.get("oi") or 0)
+    best_oi = best.get("oi") or 0
+    if best_oi < total_oi * config.next_level_min_share:
+        return None
+    return best["strike"]
+
+
 def detect_swing_levels(candles: pd.DataFrame, lookback: int = 20) -> dict:
     """Simple price-structure swing high/low over the trailing `lookback`
     candles, to merge with OI-based levels."""
@@ -276,15 +303,47 @@ def compute_atr(candles: pd.DataFrame, period: int = 14) -> float | None:
     return float(atr) if pd.notna(atr) else None
 
 
-def merge_support_resistance(oi_based: dict, price_based: dict) -> dict:
+def detect_zone_merge(oi_level: float, structure_level: float | None, spot: float, config: OptionsConfig) -> dict | None:
+    """Whether an OI-wall level and a price-structure level (for the same
+    side) sit close enough together to be treated as one zone: a real
+    incident showed an alert watching a structure level 22 points from
+    the actual OI wall it was supposedly guarding, with the wall itself
+    still untouched -- a structure edge that close to the wall has no
+    room to be an independent trade trigger.
+
+    Returns None if `structure_level` is missing or the two aren't within
+    `config.zone_merge_threshold_pct` of spot; otherwise a dict with both
+    edges and the zone width in points. **The OI wall is always the
+    trigger** -- callers must never watch/confirm a breakout against the
+    structure edge once a zone is detected.
+    """
+    if structure_level is None:
+        return None
+    threshold = spot * config.zone_merge_threshold_pct / 100
+    if abs(structure_level - oi_level) >= threshold:
+        return None
+    return {"oi_wall": oi_level, "structure_level": structure_level, "width_points": abs(structure_level - oi_level)}
+
+
+def merge_support_resistance(oi_based: dict, price_based: dict, spot: float, config: OptionsConfig) -> dict:
     """Merge OI-derived levels with price-structure swing highs/lows into
-    one candidate set per side."""
-    support = set(oi_based.get("support") or [])
-    resistance = set(oi_based.get("resistance") or [])
-    if price_based.get("swing_low") is not None:
-        support.add(price_based["swing_low"])
-    if price_based.get("swing_high") is not None:
-        resistance.add(price_based["swing_high"])
+    one candidate set per side. A structure level that zone-merges with
+    an OI wall for the same side (detect_zone_merge) is dropped from the
+    candidate set entirely -- it's zone context, never an independent
+    trigger; the OI wall alone remains the actionable level."""
+    oi_support = oi_based.get("support") or []
+    oi_resistance = oi_based.get("resistance") or []
+    support = set(oi_support)
+    resistance = set(oi_resistance)
+
+    swing_low = price_based.get("swing_low")
+    if swing_low is not None and not any(detect_zone_merge(level, swing_low, spot, config) for level in oi_support):
+        support.add(swing_low)
+
+    swing_high = price_based.get("swing_high")
+    if swing_high is not None and not any(detect_zone_merge(level, swing_high, spot, config) for level in oi_resistance):
+        resistance.add(swing_high)
+
     return {"support": sorted(support), "resistance": sorted(resistance)}
 
 
@@ -312,7 +371,18 @@ def detect_level_migration(current_levels: dict, previous_levels: dict | None) -
 
 def check_volume_confirmation(candles: pd.DataFrame, config: OptionsConfig, lookback: int = 20) -> dict:
     """Current candle's volume vs the trailing `lookback`-candle rolling
-    average (excluding the current candle itself)."""
+    average (excluding the current candle itself).
+
+    KNOWN BROKEN for NIFTY the index (^NSEI via yfinance): confirmed live
+    2026-07-23 that every single candle reports volume=0 -- the index
+    itself is never traded, only its derivatives are, so there is no such
+    thing as "NIFTY spot volume". Average is therefore always exactly
+    0.0, `average > 0` is always False, and `confirmed` can never be
+    True -- this isn't strictness, it's a permanent, structural dead end.
+    This function stays for any future NIFTY-candle use (and its own
+    tests), but evaluate_breakout_confirmation()'s volume_result must NOT
+    come from here -- see check_option_volume_confirmation() below, which
+    uses the watched contract's own real traded volume instead."""
     if candles is None or len(candles) < 2:
         return {"confirmed": False, "current_volume": None, "average_volume": None}
 
@@ -326,6 +396,33 @@ def check_volume_confirmation(candles: pd.DataFrame, config: OptionsConfig, look
 
     confirmed = average is not None and average > 0 and current >= average * config.volume_confirm_multiplier
     return {"confirmed": confirmed, "current_volume": current, "average_volume": average}
+
+
+def check_option_volume_confirmation(volume_history: list[float | None], config: OptionsConfig) -> dict:
+    """Volume confirmation using the watched level's own option contract
+    -- real traded volume, unlike NIFTY the index (see
+    check_volume_confirmation's docstring for why that path is a
+    permanent dead end). Angel One's tradeVolume is a cumulative running
+    total for the trading day, not a per-interval count, so this compares
+    the volume ADDED in the most recent snapshot interval against the
+    trailing average of prior added-volume deltas -- the options
+    equivalent of "this candle's volume vs the recent average".
+
+    `volume_history` must be ordered oldest to newest (e.g. from
+    options_engine_skill.fetch_contract_volume_history()). Needs at
+    least 3 clean readings: 2 deltas minimum, one to confirm and at least
+    one prior to average against."""
+    clean = [v for v in volume_history if v is not None]
+    if len(clean) < 3:
+        return {"confirmed": False, "current_delta": None, "average_delta": None}
+
+    deltas = [clean[i] - clean[i - 1] for i in range(1, len(clean))]
+    current_delta = deltas[-1]
+    prior_deltas = deltas[:-1]
+    average_delta = sum(prior_deltas) / len(prior_deltas) if prior_deltas else None
+
+    confirmed = average_delta is not None and average_delta > 0 and current_delta >= average_delta * config.volume_confirm_multiplier
+    return {"confirmed": confirmed, "current_delta": current_delta, "average_delta": average_delta}
 
 
 # --------------------------------------------------------------------------
@@ -436,7 +533,7 @@ def build_market_analysis(
 
     oi_levels = detect_oi_support_resistance(window)
     price_levels = detect_swing_levels(candles) if candles is not None else {"swing_high": None, "swing_low": None}
-    levels = merge_support_resistance(oi_levels, price_levels)
+    levels = merge_support_resistance(oi_levels, price_levels, spot, config)
     migration = detect_level_migration(levels, previous_levels)
 
     volume = check_volume_confirmation(candles, config) if candles is not None else {

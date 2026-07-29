@@ -24,7 +24,8 @@ pending your explicit approval of the `openclaw cron add` command.
 """
 
 import sys
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -45,8 +46,21 @@ from skills.angel_client import (
     select_weekly_and_monthly_expiry,
 )
 from skills.notify_skill import route_message
-from skills.options_analytics import build_market_analysis, compute_atr, years_to_expiry
-from skills.options_data_fetch import DataInsufficientError, cleanup_old_snapshots, fetch_nifty_candles
+from skills.options_analytics import (
+    build_market_analysis,
+    check_option_volume_confirmation,
+    compute_atr,
+    detect_next_level,
+    detect_zone_merge,
+    years_to_expiry,
+)
+from skills.options_data_fetch import (
+    DataInsufficientError,
+    cleanup_old_snapshots,
+    fetch_india_vix_with_change,
+    fetch_nifty_candles,
+    fetch_nifty_spot_backup,
+)
 from skills.options_position_monitor import (
     build_position_evidence,
     evaluate_position,
@@ -55,12 +69,16 @@ from skills.options_position_monitor import (
     should_notify,
 )
 from skills.options_rules_engine import (
+    build_confirmation_evidence_checklist,
+    build_trade_checklist,
     check_level_strike_oi_behavior,
     classify_regime,
     decide_transition,
     detect_price_trend,
     evaluate_breakout_confirmation,
     evaluate_market_rejections,
+    has_crossed_level,
+    render_checklist,
     score_confirmation,
     score_delta_oi,
     score_iv_greeks,
@@ -186,6 +204,36 @@ def _fetch_snapshot_rows(expiry_date: str, snapshot_ts: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def fetch_contract_volume_history(expiry_date: str, strike: float, side: str, before_ts: str, limit: int = 21) -> list[float | None]:
+    """Recent cumulative-volume readings for one contract, oldest to
+    newest, for check_option_volume_confirmation() -- the real-volume
+    replacement for NIFTY-index-based volume confirmation (which is
+    permanently broken, see check_volume_confirmation's docstring)."""
+    rows = fetch_all(
+        """SELECT volume FROM option_chain_snapshots
+           WHERE expiry_date = ? AND strike = ? AND side = ? AND snapshot_ts <= ?
+           ORDER BY snapshot_ts DESC LIMIT ?""",
+        (expiry_date, strike, side, before_ts, limit),
+    )
+    return [row["volume"] for row in reversed(rows)]
+
+
+def fetch_contract_premium_history(expiry_date: str, strike: float, side: str, before_ts: str, limit: int = 21) -> list[float]:
+    """Recent LTP readings for one contract, oldest to newest, for
+    check_premium_breakout() -- lets confirmation require the watched
+    contract's OWN premium to have broken its own recent range and held,
+    not just the underlying (2026-07-28 confirmation-framework addition).
+    Drops NULL ltp rows rather than passing None through, since
+    check_premium_breakout does plain numeric comparisons."""
+    rows = fetch_all(
+        """SELECT ltp FROM option_chain_snapshots
+           WHERE expiry_date = ? AND strike = ? AND side = ? AND snapshot_ts <= ?
+           ORDER BY snapshot_ts DESC LIMIT ?""",
+        (expiry_date, strike, side, before_ts, limit),
+    )
+    return [row["ltp"] for row in reversed(rows) if row["ltp"] is not None]
+
+
 def fetch_previous_snapshot(expiry_date: str, trading_date: str, before_ts: str) -> list[dict]:
     row = fetch_one(
         "SELECT MAX(snapshot_ts) AS ts FROM option_chain_snapshots WHERE expiry_date = ? AND trading_date = ? AND snapshot_ts < ?",
@@ -284,7 +332,9 @@ def _format_labeled_levels(analysis: dict) -> list[str]:
     """Support/resistance as individually labeled lines — OI wall
     (strike-based, from the option chain) vs. price structure (swing
     high/low from candles) — instead of one unlabeled merged list that
-    silently mixes round strike numbers with raw traded prices."""
+    silently mixes round strike numbers with raw traded prices. Fallback
+    rendering used only when chain/config aren't available for the full
+    Part B zone-aware body (_build_rich_alert_body)."""
     # NOTE: price-structure values use :.2f, not :g -- :g's default 6
     # significant figures silently truncates the decimals on any 5-digit
     # NIFTY price (e.g. 25260.123456 -> "25260.1", dropping a real digit).
@@ -302,43 +352,368 @@ def _format_labeled_levels(analysis: dict) -> list[str]:
     return lines
 
 
-def format_watch_escalation_message(level: float, direction: str, spot: float, analysis: dict) -> str:
+def _format_alert_timestamps(data_ts: datetime | None, sent_ts: datetime | None) -> list[str]:
+    """data_ts (chain snapshot time) vs sent_ts (alert delivery time) --
+    lets a reader see for themselves how stale an alert's underlying data
+    was by the time it arrived (alert-staleness fix, Part A1/A3)."""
+    if data_ts is None and sent_ts is None:
+        return []
+    lines = [""]
+    if data_ts is not None:
+        lines.append(f"Data as of: {data_ts:%H:%M:%S} IST")
+    if sent_ts is not None:
+        lines.append(f"Sent at: {sent_ts:%H:%M:%S} IST")
+    return lines
+
+
+def _spot_refetch_warning(spot_refetch_ok: bool) -> list[str]:
+    if spot_refetch_ok:
+        return []
+    return ["", "WARNING: spot re-check failed -- data may be stale"]
+
+
+def signed_distance_pts(spot: float, level: float, direction: str) -> float:
+    """Signed distance from spot to level: positive = hasn't happened yet
+    (still needs to move this many points to reach the level), negative =
+    already past it by this many points (Part B1 rule 1 -- the original
+    incident rounded a real -7pt breach to "0.00%", actively hiding it;
+    showing signed points first fixes that regardless of rounding)."""
+    return level - spot if direction == "UP" else spot - level
+
+
+def _format_verdict_line(verdict: str, reason: str) -> str:
+    return f"VERDICT: {verdict} -- {reason}"
+
+
+def _format_valid_until(valid_until: datetime | None) -> list[str]:
+    if valid_until is None:
+        return []
+    return [f"Valid until: {valid_until:%H:%M:%S} IST (next scan)"]
+
+
+def _format_delta_oi_lines(level: float, primary_side: str, chain: list[dict], previous_snapshot: list[dict] | None) -> list[str]:
+    """ΔOI at the level strike, both sides, in lakhs (Part B1 rules 3-4).
+    Only `primary_side` (matching the watch direction -- PE for
+    support/DOWN, CE for resistance/UP) gets the plain-language writers
+    tag: OI increasing = fresh writing defending the level, OI decreasing
+    = writers closing (level weakening). The opposite side is shown for
+    context only, no tag."""
+    opposite_side = "CE" if primary_side == "PE" else "PE"
+    lines = []
+    for side in (primary_side, opposite_side):
+        current = next((r for r in chain if r["strike"] == level and r["side"] == side), None)
+        previous = next((r for r in (previous_snapshot or []) if r["strike"] == level and r["side"] == side), None)
+        if not current or not previous:
+            continue
+        current_oi, previous_oi = current.get("oi"), previous.get("oi")
+        if current_oi is None or previous_oi is None:
+            continue
+        change_lakhs = (current_oi - previous_oi) / 100_000
+        line = f"  {level:g} {side}: {change_lakhs:+.1f}L"
+        if side == primary_side:
+            if change_lakhs > 0:
+                line += "  -> writers DEFENDING the wall"
+            elif change_lakhs < 0:
+                line += "  -> writers UNWINDING"
+        lines.append(line)
+    return lines
+
+
+def _format_confirmation_checklist(confirmation: dict | None, regime: str | None, option_side: str) -> list[str]:
+    """Confirmation checklist -- the same 6-line evidence checklist
+    (2026-07-28 unification request) used everywhere in the pipeline,
+    from build_confirmation_evidence_checklist()/render_checklist() in
+    options_rules_engine.py. confirmation=None (e.g. the exact cycle a
+    WATCH just started, before any confirmation cycle has run) renders
+    every item pending (⏳) -- this is a pre-trade-candidate alert, so it
+    never includes the strike/IV/R:R rows the final BUY message adds.
+
+    PCR/VIX are deliberately NOT checklist items here -- rulebook Section
+    29 / Rule 22: "PCR is supporting evidence, not a signal", "never use
+    PCR alone to generate a trade". They're shown elsewhere in the alert
+    as context, never as a required gate, so this checklist never
+    contradicts that rule."""
+    checklist = build_confirmation_evidence_checklist(confirmation, regime, option_side)
+    return ["CONFIRMATION CHECKLIST:", *render_checklist(checklist)]
+
+
+def _build_rich_alert_body(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    chain: list[dict] | None,
+    previous_snapshot: list[dict] | None,
+    confirmation: dict | None,
+    config: OptionsConfig | None,
+) -> list[str]:
+    """Zone/next-level/PCR+VIX/ΔOI/confirmation-checklist block shared by
+    every WATCH-mode alert variant (WATCHING, BREACH_UNCONFIRMED,
+    FALSE_BREAKOUT). Degrades gracefully section-by-section when
+    chain/config aren't supplied, rather than forking into a separate
+    "simple" template -- one rendering path, always."""
+    option_side = "PE" if direction == "DOWN" else "CE"
+    zone_label = "SUPPORT" if direction == "DOWN" else "RESISTANCE"
+    opposite_label = "Resistance" if direction == "DOWN" else "Support"
+
+    oi_levels = analysis.get("oi_levels") or {}
+    price_levels = analysis.get("price_levels") or {}
+    structure_level = price_levels.get("swing_low") if direction == "DOWN" else price_levels.get("swing_high")
+
+    lines = [f"Regime: {analysis.get('regime')}"]
+
+    zone = detect_zone_merge(level, structure_level, spot, config) if config is not None else None
+    if zone:
+        lines.append(f"{zone_label} ZONE: {zone['oi_wall']:g} (OI wall) -- {zone['width_points']:.0f} pts -- {zone['structure_level']:g} (structure)")
+    else:
+        lines.append(f"{zone_label}: {level:g} (OI wall)")
+        if structure_level is not None:
+            lines.append(f"{zone_label} (price structure): {structure_level:.2f}")
+
+    if chain is not None and config is not None:
+        next_level = detect_next_level(chain, option_side, level, direction, config)
+        if next_level is not None:
+            arrow_word = "below" if direction == "DOWN" else "above"
+            lines.append(f"Next level {arrow_word}: {next_level:g} (next {option_side}-OI cluster)")
+
+    opposite_key = "resistance" if direction == "DOWN" else "support"
+    opposite_oi = (oi_levels.get(opposite_key) or [None])[0]
+    if opposite_oi is not None:
+        lines.append(f"{opposite_label}: {opposite_oi:g} (OI wall)")
+
+    lines.append("")
+    pcr = analysis.get("pcr")
+    pcr_text = f"{pcr:.2f}" if pcr is not None else "n/a"
+    vix_info = analysis.get("vix")
+    vix_text = f"{vix_info['latest']:.1f} ({vix_info['change']:+.1f})" if vix_info else "n/a"
+    lines.append(f"PCR: {pcr_text}        VIX: {vix_text}")
+
+    if chain is not None:
+        delta_oi_lines = _format_delta_oi_lines(level, option_side, chain, previous_snapshot)
+        if delta_oi_lines:
+            lines.append("")
+            lines.append("Change in OI since last snapshot:")
+            lines.extend(delta_oi_lines)
+
+    lines.append("")
+    lines.extend(_format_confirmation_checklist(confirmation, analysis.get("regime"), option_side))
+
+    return lines
+
+
+def format_watch_escalation_message(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+    chain: list[dict] | None = None,
+    previous_snapshot: list[dict] | None = None,
+    confirmation: dict | None = None,
+    config: OptionsConfig | None = None,
+    valid_until: datetime | None = None,
+) -> str:
     side = "resistance" if direction == "UP" else "support"
     outcome = "bullish breakout -> CE" if direction == "UP" else "bearish breakdown -> PE"
-    distance_pct = abs(spot - level) / level * 100
+    distance_pts = signed_distance_pts(spot, level, direction)
+    distance_pct = distance_pts / level * 100
     lines = [
-        f"WATCHING NIFTY {side.upper()}",
+        f"\U0001F7E1 WATCHING NIFTY {side.upper()}",
         "",
-        f"Spot: {spot:g} ({distance_pct:.2f}% from level)",
+        f"Spot: {spot:,.2f} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
         f"Level: {level:g} {side}",
         f"Direction if confirmed: {outcome}",
         "",
-        f"Regime: {analysis.get('regime')}",
-        *_format_labeled_levels(analysis),
-        f"PCR: {analysis.get('pcr')}",
+        *_build_rich_alert_body(level, direction, spot, analysis, chain, previous_snapshot, confirmation, config),
+        *_spot_refetch_warning(spot_refetch_ok),
         "",
-        "Engine has switched to 1-min monitoring to judge this level.",
+        _format_verdict_line("WATCH", "level in proximity, monitoring for confirmation"),
+        *_format_valid_until(valid_until),
+        *_format_alert_timestamps(data_ts, sent_ts),
     ]
     return "\n".join(lines)
 
 
-def notify_watch_escalation(level: float, direction: str, spot: float, analysis: dict) -> None:
-    route_message("option_trading", format_watch_escalation_message(level, direction, spot, analysis), send_telegram=False, telegram_parse_mode=None)
+def notify_watch_escalation(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+    chain: list[dict] | None = None,
+    previous_snapshot: list[dict] | None = None,
+    confirmation: dict | None = None,
+    config: OptionsConfig | None = None,
+    valid_until: datetime | None = None,
+) -> None:
+    text = format_watch_escalation_message(
+        level, direction, spot, analysis, data_ts, sent_ts, spot_refetch_ok,
+        chain, previous_snapshot, confirmation, config, valid_until,
+    )
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
 
 
-def format_false_breakout_message(level: float, direction: str, confirmation: dict) -> str:
+def format_breach_unconfirmed_message(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+    chain: list[dict] | None = None,
+    previous_snapshot: list[dict] | None = None,
+    confirmation: dict | None = None,
+    config: OptionsConfig | None = None,
+    valid_until: datetime | None = None,
+) -> str:
+    """Sent instead of the plain WATCHING alert when a fresh spot
+    re-check (Part A1) shows the level was already crossed by send time
+    (Part A2) -- a "WATCHING" message for a level the market has already
+    moved through is wrong by definition."""
+    side = "resistance" if direction == "UP" else "support"
+    outcome = "bullish breakout -> CE" if direction == "UP" else "bearish breakdown -> PE"
+    distance_pts = signed_distance_pts(spot, level, direction)
+    distance_pct = distance_pts / level * 100
+    lines = [
+        f"\U0001F7E0 LEVEL BREACHED -- AWAITING CONFIRMATION ({side.upper()})",
+        "",
+        f"Spot: {spot:,.2f} already past {level:g} {side} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
+        f"Direction if confirmed: {outcome}",
+        "",
+        *_build_rich_alert_body(level, direction, spot, analysis, chain, previous_snapshot, confirmation, config),
+        *_spot_refetch_warning(spot_refetch_ok),
+        "",
+        _format_verdict_line("BREACH-UNCONFIRMED", "level crossed, confirmation pending"),
+        *_format_valid_until(valid_until),
+        *_format_alert_timestamps(data_ts, sent_ts),
+    ]
+    return "\n".join(lines)
+
+
+def notify_breach_unconfirmed(
+    level: float,
+    direction: str,
+    spot: float,
+    analysis: dict,
+    data_ts: datetime | None = None,
+    sent_ts: datetime | None = None,
+    spot_refetch_ok: bool = True,
+    chain: list[dict] | None = None,
+    previous_snapshot: list[dict] | None = None,
+    confirmation: dict | None = None,
+    config: OptionsConfig | None = None,
+    valid_until: datetime | None = None,
+) -> None:
+    text = format_breach_unconfirmed_message(
+        level, direction, spot, analysis, data_ts, sent_ts, spot_refetch_ok,
+        chain, previous_snapshot, confirmation, config, valid_until,
+    )
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
+
+
+def format_false_breakout_message(
+    level: float,
+    direction: str,
+    confirmation: dict,
+    valid_until: datetime | None = None,
+) -> str:
     side = "resistance" if direction == "UP" else "support"
     kind = "BREAKOUT" if direction == "UP" else "BREAKDOWN"
+    option_side = "CE" if direction == "UP" else "PE"
     lines = [
-        f"FALSE {kind} at {level:g} {side}",
+        f"⚫ FALSE {kind} at {level:g} {side}",
         f"OI classification at the level strike: {confirmation.get('oi_classification')}",
-        "Fresh writing detected against the move -- avoiding this trade, back to normal monitoring.",
+        "",
+        *_format_confirmation_checklist(confirmation, None, option_side),
+        "",
+        _format_verdict_line("FALSE BREAKOUT", "fresh writing detected against the move -- avoiding this trade"),
+        *_format_valid_until(valid_until),
     ]
     return "\n".join(lines)
 
 
-def notify_false_breakout(level: float, direction: str, confirmation: dict) -> None:
-    route_message("option_trading", format_false_breakout_message(level, direction, confirmation), send_telegram=False, telegram_parse_mode=None)
+def notify_false_breakout(level: float, direction: str, confirmation: dict, valid_until: datetime | None = None) -> None:
+    text = format_false_breakout_message(level, direction, confirmation, valid_until)
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
+
+
+# --------------------------------------------------------------------------
+# Alert staleness fix -- fresh-spot re-check + valid_until (Part A1/A2/A3)
+# --------------------------------------------------------------------------
+
+
+def refetch_spot_for_alert(cycle_spot: float) -> tuple[float, bool]:
+    """Best-effort fresh spot check immediately before alert delivery
+    (Part A1) -- yfinance, single call, not a full Angel One re-fetch.
+    Falls back to the cycle's own (possibly stale) spot on failure;
+    callers must render the re-check-failed warning when the second
+    element is False."""
+    fresh = fetch_nifty_spot_backup()
+    if fresh is None:
+        return cycle_spot, False
+    return fresh, True
+
+
+def compute_valid_until(now: datetime, next_mode: str) -> datetime:
+    """Next scheduled scan time for the mode being entered -- WATCH mode
+    runs 1-min cadence, NORMAL mode 5-min (Part A3)."""
+    minutes = 1 if next_mode == "WATCH" else 5
+    return now + timedelta(minutes=minutes)
+
+
+def record_alert_sent(alert_type: str, direction: str | None, level: float | None, data_ts: str | None, valid_until: datetime) -> None:
+    execute(
+        "INSERT INTO options_alerts_sent (sent_ts, alert_type, direction, level, data_ts, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
+        (datetime.now(IST).isoformat(), alert_type, direction, level, data_ts, valid_until.isoformat()),
+    )
+
+
+def _handle_escalation(
+    next_state: dict, cycle_spot: float, analysis: dict, cycle_data: dict, now: datetime,
+    previous_snapshot: list[dict], config: OptionsConfig,
+) -> None:
+    """Rulebook A1/A2 staleness fix: re-check spot immediately before
+    choosing which alert to send. The cycle's own spot was fetched at the
+    top of fetch_cycle_data() -- potentially minutes ago on a cache-miss
+    cycle (verified live: ~165s alone for the instruments master on a
+    cold cache) -- so it may already be stale by the time an alert is
+    about to go out. No confirmation evidence exists yet for this exact
+    cycle (mode was still NORMAL going in), so the checklist renders as
+    all-pending -- correct, since nothing has been evaluated yet."""
+    level = next_state["watch_level"]
+    direction = next_state["watch_direction"]
+
+    fresh_spot, refetch_ok = refetch_spot_for_alert(cycle_spot)
+    sent_ts = datetime.now(IST)
+    data_ts = datetime.fromisoformat(cycle_data["snapshot_ts"])
+    valid_until = compute_valid_until(now, "WATCH")
+    analysis["vix"] = fetch_india_vix_with_change()
+
+    if has_crossed_level(fresh_spot, level, direction):
+        notify_breach_unconfirmed(
+            level, direction, fresh_spot, analysis, data_ts, sent_ts, refetch_ok,
+            cycle_data["chain"], previous_snapshot, None, config, valid_until,
+        )
+        alert_type = "BREACH_UNCONFIRMED"
+    else:
+        notify_watch_escalation(
+            level, direction, fresh_spot, analysis, data_ts, sent_ts, refetch_ok,
+            cycle_data["chain"], previous_snapshot, None, config, valid_until,
+        )
+        alert_type = "WATCHING"
+
+    record_alert_sent(alert_type, direction, level, data_ts.isoformat(), valid_until)
+
+
+def _handle_false_breakout(engine_state: dict, confirmation: dict, now: datetime) -> None:
+    valid_until = compute_valid_until(now, "NORMAL")
+    notify_false_breakout(engine_state["watch_level"], engine_state["watch_direction"], confirmation, valid_until)
+    record_alert_sent("FALSE_BREAKOUT", engine_state["watch_direction"], engine_state["watch_level"], None, valid_until)
 
 
 # --------------------------------------------------------------------------
@@ -452,6 +827,13 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
             watch_level = engine_state["watch_level"]
             direction = engine_state["watch_direction"]
             option_side = "CE" if direction == "UP" else "PE"
+            # NIFTY-index candle volume is permanently 0 (the index itself
+            # is never traded) -- always use the watched contract's own
+            # real traded volume instead, never analysis["volume"] here.
+            volume_history = fetch_contract_volume_history(expiry, watch_level, option_side, cycle_data["snapshot_ts"])
+            volume_result = check_option_volume_confirmation(volume_history, config)
+            analysis["volume"] = volume_result
+            premium_history = fetch_contract_premium_history(expiry, watch_level, option_side, cycle_data["snapshot_ts"])
             confirmation = evaluate_breakout_confirmation(
                 candles=cycle_data["candles_1m"],
                 level=watch_level,
@@ -460,9 +842,10 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
                 option_side=option_side,
                 chain=chain,
                 previous_snapshot=previous_snapshot,
-                volume_result=analysis["volume"],
+                volume_result=volume_result,
                 regime=regime,
                 config=config,
+                premium_history=premium_history,
             )
 
         transition = decide_transition(
@@ -472,9 +855,9 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
 
         action = transition["action"]
         if action == "ESCALATE":
-            notify_watch_escalation(transition["next_state"]["watch_level"], transition["next_state"]["watch_direction"], spot, analysis)
+            _handle_escalation(transition["next_state"], spot, analysis, cycle_data, now, previous_snapshot, config)
         elif action == "FALSE_BREAKOUT":
-            notify_false_breakout(engine_state["watch_level"], engine_state["watch_direction"], confirmation)
+            _handle_false_breakout(engine_state, confirmation, now)
         elif action == "CONFIRMED":
             _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analysis, confirmation, spot, atr, regime, now, config, today)
 
@@ -601,8 +984,13 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
         result = {"action": "NO_TRADE", "reasons": [f"score {score} below minimum {config.min_score}"], "trade": result.get("trade")}
 
     why = summarize_confirmation_evidence(confirmation) if result["action"] != "NO_TRADE" else None
+    checklist = None
+    if result["action"] in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
+        iv_acceptable = sub_scores["iv_greeks"] >= 50
+        checklist = build_trade_checklist(confirmation, regime, option_side, result["trade"], iv_acceptable, config.min_rr)
     payload = build_advisory_payload(
-        result, now.isoformat(), spot, regime, analysis["support_resistance"], analysis.get("pcr"), score, why=why
+        result, now.isoformat(), spot, regime, analysis["support_resistance"], analysis.get("pcr"), score,
+        why=why, min_rr=config.min_rr, checklist=checklist,
     )
     write_advisory(payload, score, {"confirmation": confirmation, "sub_scores": sub_scores, "market_rejections": market_rejections})
 

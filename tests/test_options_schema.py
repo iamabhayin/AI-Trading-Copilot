@@ -38,7 +38,32 @@ def test_all_four_tables_created(initialized_db):
     conn = _connect(initialized_db)
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
-    assert {"option_chain_snapshots", "options_engine_state", "options_advisories", "options_positions"} <= tables
+    assert {
+        "option_chain_snapshots", "options_engine_state", "options_advisories",
+        "options_positions", "options_alerts_sent",
+    } <= tables
+
+
+def test_options_alerts_sent_rejects_invalid_alert_type(initialized_db):
+    conn = _connect(initialized_db)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO options_alerts_sent (sent_ts, alert_type, direction, level, valid_until) VALUES (?,?,?,?,?)",
+            ("2026-07-22T10:00:00+05:30", "BOGUS", "UP", 24200.0, "2026-07-22T10:01:00+05:30"),
+        )
+    conn.close()
+
+
+def test_options_alerts_sent_accepts_valid_row(initialized_db):
+    conn = _connect(initialized_db)
+    conn.execute(
+        "INSERT INTO options_alerts_sent (sent_ts, alert_type, direction, level, valid_until) VALUES (?,?,?,?,?)",
+        ("2026-07-22T10:00:00+05:30", "WATCHING", "UP", 24200.0, "2026-07-22T10:01:00+05:30"),
+    )
+    conn.commit()
+    row = conn.execute("SELECT alert_type, direction, level FROM options_alerts_sent").fetchone()
+    conn.close()
+    assert row == ("WATCHING", "UP", 24200.0)
 
 
 def test_options_engine_state_seeded_single_row_normal_mode(initialized_db):
