@@ -58,6 +58,27 @@ def execute(query: str, params: tuple = ()) -> int:
         return cursor.lastrowid
 
 
+def write_option_chain_snapshot_rows(rows: list[tuple]) -> int:
+    """Batch-insert option_chain_snapshots rows in a single transaction.
+
+    Used by skills/angel_client.py's Angel One client. A full chain is
+    dozens of rows per cycle, and at 1-min cadence this must be one
+    commit, not one per row (unlike `execute()` above).
+    """
+    if not rows:
+        return 0
+    with get_connection() as conn:
+        conn.executemany(
+            """INSERT OR IGNORE INTO option_chain_snapshots
+               (snapshot_ts, trading_date, expiry_date, strike, side, ltp, volume, oi,
+                bid, bid_qty, ask, ask_qty, iv, delta, gamma, theta, vega, spot)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
 if __name__ == "__main__":
     init_db()
     print("Database initialized.")

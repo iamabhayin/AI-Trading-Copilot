@@ -54,3 +54,94 @@ CREATE INDEX IF NOT EXISTS idx_suggestions_ticker ON suggestions (ticker);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions (status);
 CREATE INDEX IF NOT EXISTS idx_conversations_ticker ON conversations (ticker);
 CREATE INDEX IF NOT EXISTS idx_alerts_sent_position ON alerts_sent (position_id);
+
+-- ===========================================================================
+-- Option Trading (NIFTY Options Engine) — Phase 15. See docs/options-rulebook.md
+-- for rule semantics; these tables are the deterministic engine's data layer.
+-- ===========================================================================
+
+-- Full fetched option chain, every cycle, every strike in the fetched
+-- window — not just the analysis window, so change-in-OI history survives
+-- ATM re-centering as spot moves across cycles.
+CREATE TABLE IF NOT EXISTS option_chain_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_ts  TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    expiry_date  TEXT NOT NULL,
+    strike       REAL NOT NULL,
+    side         TEXT NOT NULL CHECK (side IN ('CE', 'PE')),
+    ltp          REAL,
+    volume       INTEGER,
+    oi           INTEGER,
+    bid          REAL,
+    bid_qty      INTEGER,
+    ask          REAL,
+    ask_qty      INTEGER,
+    iv           REAL,
+    delta        REAL,
+    gamma        REAL,
+    theta        REAL,
+    vega         REAL,
+    spot         REAL NOT NULL,
+    UNIQUE (snapshot_ts, expiry_date, strike, side)
+);
+
+-- Single-row dual-cadence state for the rules engine (NORMAL vs WATCH mode).
+-- id is pinned to 1 by the CHECK constraint; seeded once below.
+CREATE TABLE IF NOT EXISTS options_engine_state (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    mode             TEXT NOT NULL DEFAULT 'NORMAL' CHECK (mode IN ('NORMAL', 'WATCH')),
+    watch_level      REAL,
+    watch_direction  TEXT CHECK (watch_direction IN ('UP', 'DOWN')),
+    watch_started_ts TEXT,
+    last_run_ts      TEXT,
+    -- Trading date (YYYY-MM-DD) the weekly-vs-monthly Greeks sanity check
+    -- last passed on. The check guards against a persistent SmartAPI bug,
+    -- so once it passes for a trading day it doesn't need re-running
+    -- every single cycle -- see skills/angel_client.py's
+    -- assert_greeks_sanity() and the Task 7 rate-limit fix.
+    greeks_sanity_checked_date TEXT,
+    updated_ts       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO options_engine_state (id, mode, updated_ts) VALUES (1, 'NORMAL', datetime('now'));
+
+-- Every advisory the rules engine + trade selector ever produced, whether
+-- notified or not (routine WAIT/NO_TRADE cycles stay SQLite-only).
+CREATE TABLE IF NOT EXISTS options_advisories (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts     TEXT NOT NULL,
+    action         TEXT NOT NULL CHECK (action IN ('BUY_CE_CANDIDATE', 'BUY_PE_CANDIDATE', 'WAIT', 'NO_TRADE')),
+    payload_json   TEXT NOT NULL,
+    score          INTEGER,
+    rules_log_json TEXT,
+    notified       INTEGER NOT NULL DEFAULT 0
+);
+
+-- Open/closed option positions. Never deleted once closed — same
+-- never-delete-a-position rule as the equity `positions` table above.
+CREATE TABLE IF NOT EXISTS options_positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
+    contract      TEXT NOT NULL,
+    expiry_date   TEXT NOT NULL,
+    strike        REAL NOT NULL,
+    side          TEXT NOT NULL CHECK (side IN ('CE', 'PE')),
+    qty_lots      INTEGER NOT NULL,
+    lot_size      INTEGER NOT NULL,
+    entry_premium REAL NOT NULL,
+    entry_spot    REAL,
+    thesis_json   TEXT NOT NULL,
+    opened_ts     TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_ts     TEXT,
+    exit_premium  REAL,
+    -- Last position-monitor decision actually notified for this position
+    -- (e.g. 'HOLD', 'EXIT_TARGET') -- dedup bookkeeping only, never the
+    -- thesis itself (thesis_json is immutable, rulebook Rule 33).
+    last_notified_state TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (trading_date, expiry_date, strike, side);
+CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ts ON option_chain_snapshots (snapshot_ts);
+CREATE INDEX IF NOT EXISTS idx_options_advisories_created ON options_advisories (created_ts);
+CREATE INDEX IF NOT EXISTS idx_options_positions_status ON options_positions (status);

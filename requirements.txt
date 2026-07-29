@@ -11,3 +11,8 @@ pytest==9.1.1
 ruff==0.15.20
 pydantic==2.13.4
 loguru==0.7.3
+pyotp==2.9.0
+py_vollib==1.0.1
+smartapi-python==1.5.5
+logzero==1.7.0
+websocket-client==1.9.0
