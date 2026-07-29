@@ -264,6 +264,37 @@ def check_level_strike_oi_behavior(
     return classify_premium_oi(row.get("ltp"), prev.get("ltp"), row.get("oi"), prev.get("oi"), config.classification_min_move_pct)
 
 
+def check_premium_breakout(
+    premium_history: list[float] | None, direction: str, sustain_count: int = 2
+) -> bool | None:
+    """Does the WATCHED CONTRACT'S OWN premium confirm the underlying
+    breakout, not just the underlying itself (2026-07-28 confirmation-
+    framework addition -- "Underlying gives direction. Option premium
+    confirms execution."). `premium_history` is this exact strike/side's
+    trailing LTP readings, oldest -> newest, ending at the current cycle.
+
+    Splits the history into a "prior" reference window and the trailing
+    `sustain_count` readings; the prior window's own extreme (max for a
+    CE breakout, min for a PE breakdown) is the premium's own resistance/
+    support, and every one of the trailing readings must have closed
+    beyond it -- the same crossed+sustained shape as check_sustain(), just
+    applied to premium instead of underlying candles.
+
+    Returns None (not applicable, never a rejection by itself) when there
+    isn't enough premium history yet, matching check_retest_hold's
+    precedent for optional evidence.
+    """
+    if not premium_history or len(premium_history) < sustain_count + 1:
+        return None
+    prior, recent = premium_history[:-sustain_count], premium_history[-sustain_count:]
+    if not prior:
+        return None
+    reference_level = max(prior) if direction == "UP" else min(prior)
+    if direction == "UP":
+        return all(p > reference_level for p in recent)
+    return all(p < reference_level for p in recent)
+
+
 def evaluate_breakout_confirmation(
     candles: pd.DataFrame,
     level: float,
@@ -275,6 +306,7 @@ def evaluate_breakout_confirmation(
     volume_result: dict,
     regime: str,
     config: OptionsConfig,
+    premium_history: list[float] | None = None,
 ) -> dict:
     """All of rulebook Sections 32 (breakout) / 33 (breakdown)'s
     confirmation checklist, combined. `direction` is 'UP' (breakout,
@@ -292,6 +324,16 @@ def evaluate_breakout_confirmation(
     oi_contradicts = oi_classification == "SHORT_BUILDUP"
     retest = check_retest_hold(candles, level, direction, config)
     retest_ok = retest is not False  # None (no retest occurred) or True both acceptable per Rule 12
+    premium_confirms = check_premium_breakout(premium_history, direction, config.premium_confirm_sustain_count)
+    premium_confirms_ok = premium_confirms is not False  # None (no history yet) or True both acceptable
+
+    # Opposite-side writing at the SAME level strike (2026-07-28 addition,
+    # user's own framework: "Resistance strike par Call unwinding; nearby
+    # strikes par Put writing" / bearish mirror). Informational only --
+    # never gates `confirmed` -- since the level strike itself is only an
+    # approximation of "nearby strikes", not a true multi-strike scan.
+    opposite_side = "PE" if option_side == "CE" else "CE"
+    opposite_oi_classification = check_level_strike_oi_behavior(chain, previous_snapshot, level_strike, opposite_side, config)
 
     structure_agrees = (direction == "UP" and regime == "BULLISH") or (direction == "DOWN" and regime == "BEARISH")
 
@@ -304,6 +346,7 @@ def evaluate_breakout_confirmation(
         and oi_supports
         and structure_agrees
         and retest_ok
+        and premium_confirms_ok
         and not false_breakout
     )
 
@@ -315,6 +358,8 @@ def evaluate_breakout_confirmation(
         "oi_supports": oi_supports,
         "structure_agrees": structure_agrees,
         "retest": retest,
+        "premium_confirms": premium_confirms,
+        "opposite_oi_classification": opposite_oi_classification,
         "confirmed": confirmed,
         "false_breakout": false_breakout,
     }
@@ -346,7 +391,102 @@ def summarize_confirmation_evidence(confirmation: dict) -> list[str]:
     if confirmation.get("structure_agrees"):
         reasons.append("Broader trend structure agrees")
 
+    if confirmation.get("premium_confirms") is True:
+        reasons.append("Option premium broke its own range and sustained")
+    elif confirmation.get("premium_confirms") is False:
+        reasons.append("Option premium has NOT confirmed the underlying move")
+
     return reasons
+
+
+def build_confirmation_evidence_checklist(
+    confirmation: dict | None, regime: str | None, option_side: str
+) -> list[tuple[str, str | None, bool | None]]:
+    """The first 6 lines of the user's checklist (2026-07-28 request) --
+    the ones derivable from evaluate_breakout_confirmation()'s evidence
+    alone, without a selected trade candidate. Shared between WATCH-mode
+    alerts (no trade candidate exists yet -- moneyness/IV/R:R aren't
+    computed until select_trade() runs) and build_trade_checklist() below
+    (which appends the 3 trade-dependent rows for the final BUY message).
+
+    `met` is None (pending, not yet evaluated) rather than False whenever
+    the underlying evidence isn't available yet -- e.g. `confirmation`
+    itself is None on the very first WATCH-escalation cycle, before any
+    confirmation evaluation has run. None must never be treated as "unmet"
+    by a caller; it means "not applicable/not yet known", matching the
+    project's existing WATCH-mode "all pending" precedent.
+    """
+    bullish = option_side == "CE"
+    confirmation = confirmation or {}
+
+    crossed, sustained = confirmation.get("crossed"), confirmation.get("sustained")
+    breakout_met = None if (crossed is None and sustained is None) else bool(crossed) and bool(sustained)
+    trend_met = None if regime is None else regime == ("BULLISH" if bullish else "BEARISH")
+    oi_classification = confirmation.get("oi_classification")
+    unwind_met = None if oi_classification is None else oi_classification == "SHORT_COVERING"
+    opposite_classification = confirmation.get("opposite_oi_classification")
+    writing_met = None if opposite_classification is None else opposite_classification == "SHORT_BUILDUP"
+
+    return [
+        ("Trend", "Bullish" if bullish else "Bearish", trend_met),
+        ("Resistance breakout" if bullish else "Support breakdown", None, breakout_met),
+        ("Volume", "Above average" if bullish else "Strong", confirmation.get("volume_confirmed")),
+        ("Call unwinding" if bullish else "Put unwinding", None, unwind_met),
+        ("Put writing" if bullish else "Call writing", None, writing_met),
+        ("Premium resistance breakout" if bullish else "PE premium breakout", None, confirmation.get("premium_confirms")),
+    ]
+
+
+def build_trade_checklist(
+    confirmation: dict, regime: str, option_side: str, trade: dict, iv_acceptable: bool, min_rr: float = 2.0
+) -> list[tuple[str, str | None, bool | None]]:
+    """The user's own 9-line CE/PE confirmation checklist (2026-07-28
+    request), reusing exactly the evidence evaluate_breakout_confirmation()
+    /select_trade() already computed -- just relabeled into the trading
+    framework's own wording ("Trend -> Bullish", "Call unwinding", "Put
+    writing", ...) instead of generic internal field names.
+
+    The first 6 rows come from build_confirmation_evidence_checklist();
+    every BUY_CE/PE_CANDIDATE message this backs already passed the hard
+    evaluate_breakout_confirmation()/select_trade() gates, so those (and
+    the strike/R:R rows below) are true by construction. "Put/Call
+    writing" (opposite-side OI at the level strike) and "IV acceptable"
+    (Greeks cross-check) are the two genuinely informational, non-gating
+    rows -- they can legitimately read unmet even on a delivered BUY
+    message, which is the point: this checklist shows real confirmation
+    strength, not a rubber stamp.
+
+    Returns (label, value_word_or_None, met) triples in the exact order
+    of the user's worked example -- rendering is render_checklist()'s job.
+    """
+    bullish = option_side == "CE"
+    risk_reward = trade.get("risk_reward")
+
+    checklist = build_confirmation_evidence_checklist(confirmation, regime, option_side)
+    checklist.append(("ATM/ITM strike" if bullish else "ATM/ITM PE", None, trade.get("moneyness") in ("ATM", "ITM")))
+    checklist.append(("IV acceptable", None, iv_acceptable))
+    checklist.append(("Risk:Reward ≥ 1:2", None, risk_reward is not None and risk_reward >= min_rr))
+    return checklist
+
+
+def render_checklist(checklist: list[tuple[str, str | None, bool | None]]) -> list[str]:
+    """Renders (label, value_word, met) triples into the exact "Label ->
+    [value] marker" lines the user requested (2026-07-28) -- shared by
+    every alert type (WATCH-mode and the final BUY_CE/PE_CANDIDATE
+    message) so there is exactly one checklist look across the whole
+    pipeline, not two different formats. met=None -> pending (not yet
+    evaluated), True -> met, False -> evaluated and not met."""
+    lines = []
+    for label, value_word, met in checklist:
+        if met is None:
+            marker = "⏳"
+        elif met:
+            marker = "✔"
+        else:
+            marker = "✘"
+        value_text = f"{value_word} " if value_word else ""
+        lines.append(f"  {label} → {value_text}{marker}")
+    return lines
 
 
 # --------------------------------------------------------------------------

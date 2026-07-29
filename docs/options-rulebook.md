@@ -98,6 +98,8 @@ Example: ATM CE ₹100 → ₹94 → ₹85 → lower as expiry approaches with s
 
 Therefore: if market is sideways, direction unclear, no breakout exists, and expiry is close → **DO NOT FORCE CE/PE BUYING.** Preferred output: WAIT / NO TRADE. Theta is working against directional buyers.
 
+**Pre-entry hard floor (added 2026-07-28):** even when the expected holding period nominally fits before expiry (Section 34), a fresh directional buy is rejected outright once `days_to_expiry <= theta_danger_days` (config, default 3) — this is checked at trade-selection time, not only during post-entry position monitoring. Implementation: `check_theta_danger()` (originally position-monitor-only, `skills/options_position_monitor.py`), reused as a final-rejection-pass check in `skills/options_trade_selector.py::select_trade()` (`"theta_danger"` reason).
+
 ## 10. Implied Volatility — IV
 
 IV represents volatility expectations embedded in option prices. Generally, IV ↑ → premiums increase; IV ↓ → premiums decrease, all else equal. High IV can make options expensive.
@@ -312,12 +314,23 @@ Never define "price crossed level = confirmed breakout". Instead evaluate:
 6. Option premium/OI confirms short covering rather than fresh writing
 7. Market structure remains bullish
 8. Risk:Reward remains attractive
+9. The selected option's OWN premium chart also broke its recent range and held (if enough premium history exists) — see Section 32a
 
 More independent confirmations = higher confidence.
 
+## 32a. Premium-Chart Confirmation (added 2026-07-28)
+
+Underlying breakout alone is not enough. The specific CE/PE contract under consideration must show its own premium clearing its own recent high (CE) or low (PE) and holding for the last few readings — not just moving in the expected direction.
+
+Example: NIFTY clears resistance and sustains, but the 25000 CE premium was ₹170 → ₹176 → ₹181 → ₹185 against a recent range topping out at ₹180 — premium confirms. If instead premium stalled at ₹175 → ₹178 → ₹176 without clearing its own prior high, treat this as **wait**: the breakout may be weak, IV/seller pressure may be working against the buyer, or the wrong strike may be selected.
+
+Rule: **Underlying gives direction. Option premium confirms execution.** Absence of enough premium history (e.g. right after a WATCH escalation) is never treated as a rejection — it only gates once there is enough data to judge.
+
+Implementation: `check_premium_breakout()` in `skills/options_rules_engine.py`, wired into `evaluate_breakout_confirmation()`'s `premium_confirms` field; `OPTIONS_PREMIUM_CONFIRM_SUSTAIN_COUNT` config (default 2).
+
 ## 33. Breakdown Confirmation Rule
 
-Evaluate: price crossed below support, sustained below, strong volume, failed retest (if available), support-side positioning weakens, premium/OI confirms relevant covering/unwinding, market structure bearish, R:R remains attractive. Then consider PE.
+Evaluate: price crossed below support, sustained below, strong volume, failed retest (if available), support-side positioning weakens, premium/OI confirms relevant covering/unwinding, market structure bearish, R:R remains attractive, PE's own premium breakdown-confirms per Section 32a. Then consider PE.
 
 ## 34. Expiry Selection
 
@@ -418,6 +431,8 @@ Output NO TRADE if ANY of the following:
 16. Price already too close to target
 17. Entry requires chasing an extended move
 18. Market structure changed before entry
+19. Theta danger — days to expiry at or below `theta_danger_days`, even if the holding-period fit check (Section 34) technically passed (added 2026-07-28)
+20. The selected contract's own premium chart has not confirmed the underlying breakout/breakdown (Section 32a) — soft-gates `evaluate_breakout_confirmation()`'s `confirmed` flag rather than appearing in this list's own reason strings, but functionally the same effect
 
 **NO TRADE is a valid and valuable recommendation.**
 
@@ -597,6 +612,24 @@ REASONS: 1. 2. 3. 4.
 RISKS: 1. 2.
 WHAT WOULD CANCEL THIS TRADE: [conditions]
 ```
+
+### 54a. Confirmation Checklist Format (added 2026-07-28)
+
+The CONFIRMATION field above is rendered as a fixed 9-line checklist in the actual Discord/Telegram advisory (`build_trade_checklist()` in `skills/options_rules_engine.py`), replacing free-text reasoning with the trading framework's own exact wording — each line is `Label → [value] ✔/✘`:
+
+```
+Trend → Bullish/Bearish ✔
+Resistance breakout / Support breakdown → ✔
+Volume → Above average / Strong ✔
+Call unwinding / Put unwinding → ✔
+Put writing / Call writing → ✔
+Premium resistance breakout / PE premium breakout → ✔
+ATM/ITM strike / ATM/ITM PE → ✔
+IV acceptable → ✔
+Risk:Reward ≥ 1:2 → ✔
+```
+
+Every row down through "Premium resistance breakout"/"PE premium breakout" and "ATM/ITM strike"/"Risk:Reward" is backed by a hard gate already enforced by `evaluate_breakout_confirmation()`/`select_trade()` — a delivered BUY message cannot show those unmet. "Put writing"/"Call writing" (opposite-side OI at the level strike) and "IV acceptable" (Greeks cross-check) are informational only, never gating, and can legitimately render ✘ even on a delivered BUY candidate — this is intentional: the checklist reports real confirmation strength (the rulebook's "more independent confirmations = higher confidence"), not a rubber stamp.
 
 ## 55. Final Decision Flow
 

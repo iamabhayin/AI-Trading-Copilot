@@ -69,6 +69,8 @@ from skills.options_position_monitor import (
     should_notify,
 )
 from skills.options_rules_engine import (
+    build_confirmation_evidence_checklist,
+    build_trade_checklist,
     check_level_strike_oi_behavior,
     classify_regime,
     decide_transition,
@@ -76,6 +78,7 @@ from skills.options_rules_engine import (
     evaluate_breakout_confirmation,
     evaluate_market_rejections,
     has_crossed_level,
+    render_checklist,
     score_confirmation,
     score_delta_oi,
     score_iv_greeks,
@@ -213,6 +216,22 @@ def fetch_contract_volume_history(expiry_date: str, strike: float, side: str, be
         (expiry_date, strike, side, before_ts, limit),
     )
     return [row["volume"] for row in reversed(rows)]
+
+
+def fetch_contract_premium_history(expiry_date: str, strike: float, side: str, before_ts: str, limit: int = 21) -> list[float]:
+    """Recent LTP readings for one contract, oldest to newest, for
+    check_premium_breakout() -- lets confirmation require the watched
+    contract's OWN premium to have broken its own recent range and held,
+    not just the underlying (2026-07-28 confirmation-framework addition).
+    Drops NULL ltp rows rather than passing None through, since
+    check_premium_breakout does plain numeric comparisons."""
+    rows = fetch_all(
+        """SELECT ltp FROM option_chain_snapshots
+           WHERE expiry_date = ? AND strike = ? AND side = ? AND snapshot_ts <= ?
+           ORDER BY snapshot_ts DESC LIMIT ?""",
+        (expiry_date, strike, side, before_ts, limit),
+    )
+    return [row["ltp"] for row in reversed(rows) if row["ltp"] is not None]
 
 
 def fetch_previous_snapshot(expiry_date: str, trading_date: str, before_ts: str) -> list[dict]:
@@ -400,37 +419,22 @@ def _format_delta_oi_lines(level: float, primary_side: str, chain: list[dict], p
     return lines
 
 
-def _format_confirmation_checklist(confirmation: dict | None) -> list[str]:
-    """Confirmation checklist -- rulebook Sections 32/33's existing
-    evaluate_breakout_confirmation() evidence fields (Part B1 rule 5).
-    confirmation=None (e.g. the exact cycle a WATCH just started, before
-    any confirmation cycle has run) renders every item pending.
+def _format_confirmation_checklist(confirmation: dict | None, regime: str | None, option_side: str) -> list[str]:
+    """Confirmation checklist -- the same 6-line evidence checklist
+    (2026-07-28 unification request) used everywhere in the pipeline,
+    from build_confirmation_evidence_checklist()/render_checklist() in
+    options_rules_engine.py. confirmation=None (e.g. the exact cycle a
+    WATCH just started, before any confirmation cycle has run) renders
+    every item pending (⏳) -- this is a pre-trade-candidate alert, so it
+    never includes the strike/IV/R:R rows the final BUY message adds.
 
     PCR/VIX are deliberately NOT checklist items here -- rulebook Section
     29 / Rule 22: "PCR is supporting evidence, not a signal", "never use
     PCR alone to generate a trade". They're shown elsewhere in the alert
     as context, never as a required gate, so this checklist never
     contradicts that rule."""
-    items = [
-        ("Price crossed the level", confirmation.get("crossed") if confirmation else None),
-        ("Sustained beyond the level", confirmation.get("sustained") if confirmation else None),
-        ("Volume confirms the move", confirmation.get("volume_confirmed") if confirmation else None),
-        ("Level-strike OI supports the move", confirmation.get("oi_supports") if confirmation else None),
-        ("Broader trend structure agrees", confirmation.get("structure_agrees") if confirmation else None),
-    ]
-    if confirmation and confirmation.get("retest") is not None:
-        items.append(("Retest of the level held", confirmation.get("retest")))
-
-    lines = ["CONFIRMATION CHECKLIST (all required):"]
-    for label, value in items:
-        if value is None:
-            marker = "⏳"  # pending
-        elif value:
-            marker = "✅"  # met
-        else:
-            marker = "❌"  # failed
-        lines.append(f"  {marker}  {label}")
-    return lines
+    checklist = build_confirmation_evidence_checklist(confirmation, regime, option_side)
+    return ["CONFIRMATION CHECKLIST:", *render_checklist(checklist)]
 
 
 def _build_rich_alert_body(
@@ -492,7 +496,7 @@ def _build_rich_alert_body(
             lines.extend(delta_oi_lines)
 
     lines.append("")
-    lines.extend(_format_confirmation_checklist(confirmation))
+    lines.extend(_format_confirmation_checklist(confirmation, analysis.get("regime"), option_side))
 
     return lines
 
@@ -516,9 +520,9 @@ def format_watch_escalation_message(
     distance_pts = signed_distance_pts(spot, level, direction)
     distance_pct = distance_pts / level * 100
     lines = [
-        f"WATCHING NIFTY {side.upper()}",
+        f"\U0001F7E1 WATCHING NIFTY {side.upper()}",
         "",
-        f"Spot: {spot:,.1f} ({distance_pts:+.1f} pts / {distance_pct:+.2f}%)",
+        f"Spot: {spot:,.2f} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
         f"Level: {level:g} {side}",
         f"Direction if confirmed: {outcome}",
         "",
@@ -576,9 +580,9 @@ def format_breach_unconfirmed_message(
     distance_pts = signed_distance_pts(spot, level, direction)
     distance_pct = distance_pts / level * 100
     lines = [
-        f"LEVEL BREACHED -- AWAITING CONFIRMATION ({side.upper()})",
+        f"\U0001F7E0 LEVEL BREACHED -- AWAITING CONFIRMATION ({side.upper()})",
         "",
-        f"Spot: {spot:,.1f} already past {level:g} {side} ({distance_pts:+.1f} pts / {distance_pct:+.2f}%)",
+        f"Spot: {spot:,.2f} already past {level:g} {side} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
         f"Direction if confirmed: {outcome}",
         "",
         *_build_rich_alert_body(level, direction, spot, analysis, chain, previous_snapshot, confirmation, config),
@@ -620,11 +624,12 @@ def format_false_breakout_message(
 ) -> str:
     side = "resistance" if direction == "UP" else "support"
     kind = "BREAKOUT" if direction == "UP" else "BREAKDOWN"
+    option_side = "CE" if direction == "UP" else "PE"
     lines = [
-        f"FALSE {kind} at {level:g} {side}",
+        f"⚫ FALSE {kind} at {level:g} {side}",
         f"OI classification at the level strike: {confirmation.get('oi_classification')}",
         "",
-        *_format_confirmation_checklist(confirmation),
+        *_format_confirmation_checklist(confirmation, None, option_side),
         "",
         _format_verdict_line("FALSE BREAKOUT", "fresh writing detected against the move -- avoiding this trade"),
         *_format_valid_until(valid_until),
@@ -828,6 +833,7 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
             volume_history = fetch_contract_volume_history(expiry, watch_level, option_side, cycle_data["snapshot_ts"])
             volume_result = check_option_volume_confirmation(volume_history, config)
             analysis["volume"] = volume_result
+            premium_history = fetch_contract_premium_history(expiry, watch_level, option_side, cycle_data["snapshot_ts"])
             confirmation = evaluate_breakout_confirmation(
                 candles=cycle_data["candles_1m"],
                 level=watch_level,
@@ -839,6 +845,7 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
                 volume_result=volume_result,
                 regime=regime,
                 config=config,
+                premium_history=premium_history,
             )
 
         transition = decide_transition(
@@ -977,8 +984,13 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
         result = {"action": "NO_TRADE", "reasons": [f"score {score} below minimum {config.min_score}"], "trade": result.get("trade")}
 
     why = summarize_confirmation_evidence(confirmation) if result["action"] != "NO_TRADE" else None
+    checklist = None
+    if result["action"] in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
+        iv_acceptable = sub_scores["iv_greeks"] >= 50
+        checklist = build_trade_checklist(confirmation, regime, option_side, result["trade"], iv_acceptable, config.min_rr)
     payload = build_advisory_payload(
-        result, now.isoformat(), spot, regime, analysis["support_resistance"], analysis.get("pcr"), score, why=why
+        result, now.isoformat(), spot, regime, analysis["support_resistance"], analysis.get("pcr"), score,
+        why=why, min_rr=config.min_rr, checklist=checklist,
     )
     write_advisory(payload, score, {"confirmation": confirmation, "sub_scores": sub_scores, "market_rejections": market_rejections})
 

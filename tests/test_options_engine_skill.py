@@ -27,6 +27,7 @@ from skills.options_engine_skill import (
     _handle_false_breakout,
     acquire_lock,
     compute_valid_until,
+    fetch_contract_premium_history,
     fetch_contract_volume_history,
     fetch_cycle_data,
     fetch_first_of_day_snapshot,
@@ -255,6 +256,35 @@ def test_fetch_contract_volume_history_respects_before_ts(real_db):
     assert history == [10_000]
 
 
+def test_fetch_contract_premium_history_oldest_to_newest(real_db):
+    from db.database import execute
+
+    for ts, ltp in [("2025-07-20T09:45:00+05:30", 35.0), ("2025-07-20T09:50:00+05:30", 45.0), ("2025-07-20T09:55:00+05:30", 55.0)]:
+        execute(
+            "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, ltp) VALUES (?,?,?,?,?,?,?,?)",
+            (ts, "2025-07-20", "24JUL2025", 25200.0, "CE", 1_000_000, 25000.0, ltp),
+        )
+
+    history = fetch_contract_premium_history("24JUL2025", 25200.0, "CE", "2025-07-20T09:55:00+05:30")
+    assert history == [35.0, 45.0, 55.0]
+
+
+def test_fetch_contract_premium_history_drops_null_rows(real_db):
+    from db.database import execute
+
+    execute(
+        "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, ltp) VALUES (?,?,?,?,?,?,?,?)",
+        ("2025-07-20T09:45:00+05:30", "2025-07-20", "24JUL2025", 25200.0, "CE", 1_000_000, 25000.0, None),
+    )
+    execute(
+        "INSERT INTO option_chain_snapshots (snapshot_ts, trading_date, expiry_date, strike, side, oi, spot, ltp) VALUES (?,?,?,?,?,?,?,?)",
+        ("2025-07-20T09:50:00+05:30", "2025-07-20", "24JUL2025", 25200.0, "CE", 1_000_000, 25000.0, 45.0),
+    )
+
+    history = fetch_contract_premium_history("24JUL2025", 25200.0, "CE", "2025-07-20T09:50:00+05:30")
+    assert history == [45.0]
+
+
 def test_fetch_prior_day_last_snapshot(real_db):
     _insert_snapshot("2025-07-19", "2025-07-19T15:25:00", "24JUL2025", 25200.0, "CE", 500)
     _insert_snapshot("2025-07-20", "2025-07-20T09:15:00", "24JUL2025", 25200.0, "CE", 100)
@@ -282,11 +312,12 @@ def test_format_watch_escalation_message():
         "pcr": 1.1,
     }
     text = format_watch_escalation_message(25200.0, "UP", 25190.0, analysis)
-    assert "WATCHING NIFTY RESISTANCE" in text
+    assert "\U0001F7E1 WATCHING NIFTY RESISTANCE" in text
     assert "25200" in text
     assert "RESISTANCE: 25200 (OI wall)" in text
     assert "RESISTANCE (price structure): 25260.12" in text
     assert "Support: 24800 (OI wall)" in text
+    assert "Spot: 25,190.00" in text  # 2026-07-28: bumped from 1 to 2 decimals
 
 
 def test_format_watch_escalation_message_includes_timestamps_when_provided():
@@ -334,9 +365,8 @@ def test_format_false_breakout_message_includes_checklist_and_valid_until():
         "oi_classification": "SHORT_BUILDUP",
     }
     text = format_false_breakout_message(25200.0, "UP", confirmation, valid_until=datetime(2026, 7, 22, 10, 5, tzinfo=IST))
-    assert "✅  Price crossed the level" in text
-    assert "❌  Sustained beyond the level" in text
-    assert "❌  Retest of the level held" in text
+    assert "Resistance breakout → ✘" in text  # crossed=True but sustained=False -> not met
+    assert "Call unwinding → ✘" in text  # oi_classification=SHORT_BUILDUP, not SHORT_COVERING
     assert "VERDICT: FALSE BREAKOUT" in text
     assert "Valid until: 10:05:00 IST (next scan)" in text
 
@@ -366,28 +396,36 @@ def test_signed_distance_pts_down_still_safe_is_positive():
 
 
 def test_format_confirmation_checklist_all_pending_when_no_confirmation():
-    lines = _format_confirmation_checklist(None)
+    """A fresh WATCH escalation: no evidence evaluated yet, regime unknown
+    -- every row must render as pending (⏳), never a false negative."""
+    lines = _format_confirmation_checklist(None, None, "CE")
     assert all("⏳" in line for line in lines[1:])
 
 
 def test_format_confirmation_checklist_mixed_states():
     confirmation = {
         "crossed": True, "sustained": False, "volume_confirmed": True,
-        "oi_supports": True, "structure_agrees": False, "retest": None,
+        "oi_classification": "SHORT_COVERING", "opposite_oi_classification": "SHORT_BUILDUP",
+        "premium_confirms": True,
     }
-    lines = _format_confirmation_checklist(confirmation)
+    lines = _format_confirmation_checklist(confirmation, "BULLISH", "CE")
     text = "\n".join(lines)
-    assert "✅  Price crossed the level" in text
-    assert "❌  Sustained beyond the level" in text
-    assert "✅  Level-strike OI supports the move" in text
-    assert "❌  Broader trend structure agrees" in text
-    assert "Retest" not in text  # retest=None (no retest occurred) -- omitted, not shown as failed
+    assert "Trend → Bullish ✔" in text
+    assert "Resistance breakout → ✘" in text  # crossed=True but sustained=False -> not met
+    assert "Volume → Above average ✔" in text
+    assert "Call unwinding → ✔" in text
+    assert "Put writing → ✔" in text
+    assert "Premium resistance breakout → ✔" in text
 
 
-def test_format_confirmation_checklist_includes_retest_when_present():
-    confirmation = {"crossed": True, "sustained": True, "volume_confirmed": True, "oi_supports": True, "structure_agrees": True, "retest": True}
-    text = "\n".join(_format_confirmation_checklist(confirmation))
-    assert "✅  Retest of the level held" in text
+def test_format_confirmation_checklist_never_includes_trade_dependent_rows():
+    """WATCH-mode alerts never have a selected trade candidate yet, so the
+    strike/IV/R:R rows the final BUY message adds must never appear here."""
+    confirmation = {"crossed": True, "sustained": True, "volume_confirmed": True}
+    text = "\n".join(_format_confirmation_checklist(confirmation, "BULLISH", "CE"))
+    assert "ATM/ITM strike" not in text
+    assert "IV acceptable" not in text
+    assert "Risk:Reward" not in text
 
 
 def test_format_delta_oi_lines_tags_primary_side_defending():
@@ -445,7 +483,8 @@ def test_format_watch_escalation_message_full_rich_rendering():
     assert "24000 PE: +12.0L  -> writers DEFENDING the wall" in text
     assert "24000 CE: +3.0L" in text
     assert "CONFIRMATION CHECKLIST" in text
-    assert "⏳  Price crossed the level" in text
+    assert "Trend → Bearish ✘" in text  # regime is RANGE, not BEARISH -- known and not met, not pending
+    assert "Support breakdown → ⏳" in text  # crossed/sustained not evaluated yet (confirmation=None)
     assert "VERDICT: WATCH" in text
     assert "Valid until: 14:26:00 IST (next scan)" in text
 

@@ -75,6 +75,11 @@ class OptionsConfig(BaseModel):
     # |recomputed - broker| delta divergence above this logs a warning —
     # informational only, never blocks (rulebook implementation notes).
     greeks_divergence_threshold: float = 0.15
+    # Number of trailing premium snapshots that must hold beyond the prior
+    # premium range for check_premium_breakout() to confirm the watched
+    # contract's OWN premium chart broke out, not just the underlying
+    # (2026-07-28 confirmation-framework addition to Sections 32/33).
+    premium_confirm_sustain_count: int = 2
 
     # --- Scoring (rulebook Section 43 weights) ---
     min_score: int = 70
@@ -189,6 +194,7 @@ class OptionsConfigLoader:
                 classification_min_move_pct=float(_env("OPTIONS_CLASSIFICATION_MIN_MOVE_PCT", "2.0")),
                 risk_free_rate=float(_env("OPTIONS_RISK_FREE_RATE", "0.065")),
                 greeks_divergence_threshold=float(_env("OPTIONS_GREEKS_DIVERGENCE_THRESHOLD", "0.15")),
+                premium_confirm_sustain_count=int(_env("OPTIONS_PREMIUM_CONFIRM_SUSTAIN_COUNT", "2")),
                 min_score=int(_env("OPTIONS_MIN_SCORE", "70")),
                 score_weight_trend_pa=int(_env("OPTIONS_SCORE_WEIGHT_TREND_PA", "20")),
                 score_weight_confirmation=int(_env("OPTIONS_SCORE_WEIGHT_CONFIRMATION", "20")),

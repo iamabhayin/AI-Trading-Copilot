@@ -40,6 +40,8 @@ from config.options_config import OptionsConfig
 from db.database import execute
 from skills.angel_client import format_expiry_readable
 from skills.notify_skill import route_message
+from skills.options_position_monitor import check_theta_danger
+from skills.options_rules_engine import render_checklist
 
 
 def _parse_expiry(expiry: str) -> date:
@@ -301,6 +303,8 @@ def evaluate_trade_rejections(trade: dict, config: OptionsConfig) -> list[str]:
         reasons.append("option selected only because cheap")
     if trade.get("event_risk"):
         reasons.append("abnormal IV / event risk not accounted for")
+    if trade.get("theta_danger"):
+        reasons.append("theta danger: too close to expiry for fresh directional buying")
 
     rr = trade.get("risk_reward")
     if rr is not None and rr < config.min_rr:
@@ -370,17 +374,23 @@ def select_trade(
     option_sl = map_to_option_stop(entry_premium, delta, entry_underlying, invalidation_spot, config)
 
     targets = compute_targets(entry_underlying, target_level, config)
-    target_premium = (
+    target_premium_1 = (
+        estimate_target_premium(entry_premium, delta, entry_underlying, targets["t1"], config)
+        if targets["t1"] is not None
+        else None
+    )
+    target_premium_2 = (
         estimate_target_premium(entry_premium, delta, entry_underlying, targets["t2"], config)
         if targets["t2"] is not None
         else None
     )
-    risk_reward = compute_option_rr(entry_premium, option_sl, target_premium)
+    risk_reward = compute_option_rr(entry_premium, option_sl, target_premium_2)
     if risk_reward is None:
         risk_reward = compute_structural_rr(entry_underlying, invalidation_spot, targets["t2"])
 
     lot_size = lot_size_for_expiry(contracts, expiry) or 0
     position_size_lots = compute_position_size(capital, config.risk_pct, entry_premium, option_sl, lot_size)
+    days_to_expiry = (_parse_expiry(expiry) - today).days
 
     price_too_close_to_target = targets["t2"] is not None and abs(targets["t2"] - entry_underlying) <= (
         entry_underlying * config.proximity_threshold_pct / 100
@@ -397,12 +407,15 @@ def select_trade(
         "option_stop": option_sl,
         "target_1": targets["t1"],
         "target_2": targets["t2"],
+        "target_premium_1": target_premium_1,
+        "target_premium_2": target_premium_2,
         "risk_reward": risk_reward,
         "position_size_lots": position_size_lots,
         "lot_size": lot_size,
         "far_otm": _is_far_otm(abs(delta)),
         "cheap_only": cheap_only,
         "event_risk": check_event_risk(expiry, config, today),
+        "theta_danger": check_theta_danger(days_to_expiry, config),
         "price_too_close_to_target": price_too_close_to_target,
         "chasing_extended_move": chasing_extended_move,
     }
@@ -428,11 +441,19 @@ def build_advisory_payload(
     pcr: float | None,
     score: int | None,
     why: list[str] | None = None,
+    min_rr: float | None = None,
+    checklist: list[tuple[str, str | None, bool]] | None = None,
 ) -> dict:
     """Full Section 54 structured payload. `why` (from
-    options_rules_engine.summarize_confirmation_evidence) is the plain-
-    language evidence list shown in the Discord/Telegram message —
-    optional since a NO_TRADE result has `reasons` instead."""
+    options_rules_engine.summarize_confirmation_evidence) is kept for the
+    persisted DB record/audit trail, but the message template renders
+    `checklist` (options_rules_engine.build_trade_checklist's 9-line
+    "Trend -> Bullish", "Call unwinding", ... format, 2026-07-28 request)
+    instead -- optional since a NO_TRADE result has `reasons` instead of
+    either. `min_rr` (config.min_rr) is carried through purely for
+    display context in the message template -- "Risk:Reward: 1:2.50 (min
+    required 1:2.00)" -- never re-evaluated here (select_trade already
+    applied the gate)."""
     payload = {
         "market": "NIFTY",
         "data_timestamp": data_timestamp,
@@ -444,6 +465,10 @@ def build_advisory_payload(
         "action": result["action"],
         "confidence": score,
     }
+    if min_rr is not None:
+        payload["min_rr"] = min_rr
+    if checklist is not None:
+        payload["checklist"] = checklist
     trade = result.get("trade")
     if trade:
         payload.update(
@@ -457,6 +482,8 @@ def build_advisory_payload(
                 "option_stop": trade["option_stop"],
                 "target_1": trade["target_1"],
                 "target_2": trade["target_2"],
+                "target_premium_1": trade.get("target_premium_1"),
+                "target_premium_2": trade.get("target_premium_2"),
                 "risk_reward": trade["risk_reward"],
                 "position_size_lots": trade["position_size_lots"],
                 "lot_size": trade["lot_size"],
@@ -479,30 +506,125 @@ def write_advisory(payload: dict, score: int | None, rules_log: dict) -> int:
     )
 
 
+_ACTION_LABELS = {
+    "BUY_CE_CANDIDATE": "BUY CALL (CE)",
+    "BUY_PE_CANDIDATE": "BUY PUT (PE)",
+    "NO_TRADE": "NO TRADE",
+    "WAIT": "WAIT",
+}
+
+_ACTION_MARKERS = {
+    "BUY_CE_CANDIDATE": "\U0001F7E2",  # green circle -- bullish
+    "BUY_PE_CANDIDATE": "\U0001F534",  # red circle -- bearish
+    "NO_TRADE": "⚪",  # white circle -- no edge
+    "WAIT": "\U0001F7E1",  # yellow circle -- pending
+}
+
+
+def _fmt_price(value: float | None) -> str:
+    """Underlying (NIFTY spot/level) points -- comma-grouped, 2 decimals,
+    so a raw float (e.g. 25320.19999999998 from delta-mapped arithmetic)
+    never leaks into a financial message verbatim."""
+    return f"{value:,.2f}" if value is not None else "n/a"
+
+
+def _fmt_money(value: float | None) -> str:
+    """Option premium in rupees -- same rounding as _fmt_price, prefixed
+    so it's never confused with an underlying/spot number in the same
+    message."""
+    return f"Rs {value:,.2f}" if value is not None else "n/a"
+
+
+def _fmt_pct_change(entry: float | None, other: float | None) -> str:
+    """' (+32.1%)' from entry -> other, or '' if either side is missing --
+    lets a reader judge a target/stop's real magnitude without doing the
+    percentage math themselves mid-trade."""
+    if not entry or other is None:
+        return ""
+    return f" ({(other - entry) / entry * 100:+.1f}%)"
+
+
+def _fmt_rr(risk_reward: float | None, min_rr: float | None) -> str:
+    if risk_reward is None:
+        return "n/a"
+    text = f"1 : {risk_reward:.2f}"
+    if min_rr is not None:
+        text += f"  (min required 1 : {min_rr:.2f})"
+    return text
+
+
 def _template_advisory_message(payload: dict) -> str:
-    """Deterministic fallback formatting — no LLM involved. Exact wording
-    still open for feedback (see docs discussion) — the WHY section is
-    the important part, phrasing can be refined later."""
+    """Deterministic fallback formatting — no LLM involved. Every number
+    is rounded/labeled explicitly (rupee vs underlying-point, entry vs
+    target vs stop) rather than printed with whatever float precision the
+    upstream arithmetic happened to produce -- a financial advisory that
+    reads "25320.199999999997" is not more precise, it's just noise."""
     action = payload["action"]
-    lines = [f"NIFTY Options - {action}"]
+    label = _ACTION_LABELS.get(action, action)
+    marker = _ACTION_MARKERS.get(action, "")
+    lines = [f"{marker} NIFTY OPTIONS -- {label}".strip()]
+
     if action in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
         readable_expiry = format_expiry_readable(payload["expiry"])
         lines.append(f"Suggest: BUY NIFTY {payload['strike']:g} {payload['side']}, expiry {readable_expiry}")
         lines.append(f"({payload['moneyness']}, full expiry {payload['expiry']})")
-        if payload.get("why"):
+        if payload.get("checklist"):
             lines.append("")
-            lines.append("Why this breakout:")
-            lines.extend(f"- {reason}" for reason in payload["why"])
+            lines.append("CONFIRMATION CHECKLIST:")
+            lines.extend(render_checklist(payload["checklist"]))
+
+        entry_lo, entry_hi = payload["entry_zone"]
+        entry_premium = payload.get("entry_premium")
+        option_stop = payload["option_stop"]
+        target_1, target_2 = payload["target_1"], payload["target_2"]
+        target_premium_1, target_premium_2 = payload.get("target_premium_1"), payload.get("target_premium_2")
+
         lines.append("")
-        lines.append(f"Entry zone: {payload['entry_zone']}")
-        lines.append(f"Underlying invalidation: {payload['underlying_invalidation']:g}")
-        lines.append(f"Option stop: {payload['option_stop']:g}")
-        lines.append(f"Target 1: {payload['target_1']}")
-        lines.append(f"Target 2: {payload['target_2']}")
-        lines.append(f"Risk:Reward: {payload['risk_reward']}")
-        lines.append(f"Position size: {payload['position_size_lots']} lot(s)")
+        lines.append("ENTRY")
+        lines.append(f"  Underlying zone: {_fmt_price(entry_lo)} - {_fmt_price(entry_hi)}")
+        lines.append(f"  Option entry premium: {_fmt_money(entry_premium)}")
+
+        lines.append("")
+        lines.append("RISK")
+        lines.append(f"  Underlying invalidation: {_fmt_price(payload['underlying_invalidation'])}")
+        lines.append(f"  Option stop-loss: {_fmt_money(option_stop)}{_fmt_pct_change(entry_premium, option_stop)}")
+
+        lines.append("")
+        lines.append("TARGETS")
+        if target_1 is not None:
+            lines.append(
+                f"  T1: underlying {_fmt_price(target_1)} / option {_fmt_money(target_premium_1)}"
+                f"{_fmt_pct_change(entry_premium, target_premium_1)}"
+            )
+        else:
+            lines.append("  T1: n/a (no next level detected)")
+        if target_2 is not None:
+            lines.append(
+                f"  T2: underlying {_fmt_price(target_2)} / option {_fmt_money(target_premium_2)}"
+                f"{_fmt_pct_change(entry_premium, target_premium_2)}"
+            )
+        else:
+            lines.append("  T2: n/a (no next level detected)")
+
+        lines.append("")
+        lines.append(f"Risk:Reward: {_fmt_rr(payload.get('risk_reward'), payload.get('min_rr'))}")
+
+        lots = payload.get("position_size_lots")
+        lot_size = payload.get("lot_size")
+        size_text = f"{lots} lot(s)" if lots is not None else "n/a"
+        if lots is not None and lot_size:
+            size_text += f" ({lots * lot_size} qty)"
+        lines.append(f"Position size: {size_text}")
     else:
-        lines.append(f"Reasons: {', '.join(payload.get('reasons', []))}")
+        lines.append("")
+        reasons = payload.get("reasons") or []
+        if reasons:
+            lines.append("Reasons:")
+            lines.extend(f"- {reason}" for reason in reasons)
+        else:
+            lines.append("Reasons: none recorded")
+
+    lines.append("")
     lines.append(f"Confidence: {payload.get('confidence')}/100")
     lines.append(f"Data timestamp: {payload['data_timestamp']}")
     return "\n".join(lines)
