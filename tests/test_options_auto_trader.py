@@ -383,6 +383,30 @@ def test_force_close_stale_positions_closes_open_position(real_db):
     mock_route.assert_called_once()
 
 
+def test_force_close_stale_positions_closes_and_warns_when_from_prior_day(real_db):
+    """Regression: force_close_stale_positions used to no-op on a position
+    whose trade_date != today, leaving it 'open' forever and permanently
+    blocking can_open_new_trade() (has_open_position() has no date filter).
+    It must close ANY open position, and flag the abnormal case loudly."""
+    yesterday = date(2026, 7, 28)
+    _insert_position(status="open", trade_date=yesterday.isoformat())
+    with (
+        patch("skills.options_auto_trader.route_message") as mock_route,
+        patch("skills.options_auto_trader._fetch_current_premium_live", return_value=140.0),
+    ):
+        force_close_stale_positions(_config(), TODAY)
+
+    from db.database import fetch_one
+
+    row = fetch_one("SELECT * FROM auto_options_positions WHERE status = 'closed'")
+    assert row is not None
+    assert row["exit_reason"] == "FORCED_SQUAREOFF"
+    assert has_open_position() is None
+    assert mock_route.call_count == 2  # stale-position warning + the normal exit notification
+    warning_text = mock_route.call_args_list[0].args[1]
+    assert "WARNING" in warning_text and yesterday.isoformat() in warning_text
+
+
 def test_force_close_stale_positions_noop_when_none_open(real_db):
     with patch("skills.options_auto_trader.route_message") as mock_route:
         force_close_stale_positions(_config(), TODAY)

@@ -19,6 +19,7 @@ from skills.options_data_fetch import (
     fetch_india_vix,
     fetch_india_vix_with_change,
     fetch_nifty_spot_backup,
+    filter_session_candles,
 )
 
 
@@ -158,3 +159,54 @@ def test_cleanup_old_snapshots_keeps_everything_within_retention_window(real_db)
     deleted = cleanup_old_snapshots(config, today=date(2026, 7, 20))
 
     assert deleted == 0
+
+
+# --------------------------------------------------------------------------
+# filter_session_candles -- day-wise S/R/ATR/trend inputs (2026-07-30)
+# --------------------------------------------------------------------------
+
+
+def _multi_day_candles() -> pd.DataFrame:
+    """Straddles two IST calendar days: 3 candles late on 2026-07-29, 4
+    candles on 2026-07-30 -- mirrors what fetch_nifty_candles(period='5d')
+    actually returns near the start of a session."""
+    index = pd.DatetimeIndex(
+        [
+            "2026-07-29 14:50:00", "2026-07-29 14:55:00", "2026-07-29 15:00:00",
+            "2026-07-30 09:15:00", "2026-07-30 09:20:00", "2026-07-30 09:25:00", "2026-07-30 09:30:00",
+        ],
+        tz="Asia/Kolkata",
+    )
+    closes = [24100.0, 24110.0, 24120.0, 24200.0, 24210.0, 24220.0, 24230.0]
+    return pd.DataFrame(
+        {"open": closes, "high": [c + 5 for c in closes], "low": [c - 5 for c in closes], "close": closes, "volume": [1000] * 7},
+        index=index,
+    )
+
+
+def test_filter_session_candles_drops_prior_day_rows():
+    candles = _multi_day_candles()
+    result = filter_session_candles(candles, date(2026, 7, 30))
+    assert len(result) == 4
+    assert list(result["close"]) == [24200.0, 24210.0, 24220.0, 24230.0]
+
+
+def test_filter_session_candles_handles_tz_naive_index():
+    candles = _multi_day_candles()
+    candles.index = candles.index.tz_localize(None)
+    result = filter_session_candles(candles, date(2026, 7, 30))
+    assert len(result) == 4
+
+
+def test_filter_session_candles_noop_on_synthetic_index():
+    """RangeIndex fixtures (as used throughout test_options_engine_skill.py)
+    must pass through unchanged -- filter_session_candles only acts on a
+    real DatetimeIndex."""
+    candles = pd.DataFrame({"open": [1], "high": [2], "low": [0], "close": [1], "volume": [100]})
+    result = filter_session_candles(candles, date(2026, 7, 30))
+    assert len(result) == 1
+
+
+def test_filter_session_candles_empty_input_returns_empty():
+    empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    assert filter_session_candles(empty, date(2026, 7, 30)).empty

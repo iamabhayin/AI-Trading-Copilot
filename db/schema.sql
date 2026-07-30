@@ -150,12 +150,36 @@ CREATE TABLE IF NOT EXISTS options_positions (
 CREATE TABLE IF NOT EXISTS options_alerts_sent (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     sent_ts     TEXT NOT NULL,
-    alert_type  TEXT NOT NULL CHECK (alert_type IN ('WATCHING', 'BREACH_UNCONFIRMED', 'FALSE_BREAKOUT')),
+    alert_type  TEXT NOT NULL CHECK (alert_type IN ('WATCHING', 'BREACH_UNCONFIRMED', 'FALSE_BREAKOUT', 'WATCH_ENDED')),
     direction   TEXT CHECK (direction IN ('UP', 'DOWN')),
     level       REAL,
     data_ts     TEXT,
     valid_until TEXT NOT NULL
 );
+
+-- One row per WATCH-mode cycle's evaluate_breakout_confirmation() output
+-- (2026-07-30) -- without this, a watch that times out after 45 minutes
+-- leaves no trace of which of the 5 required conditions (crossed,
+-- sustained, volume_confirmed, oi_supports, structure_agrees) it failed,
+-- making "why didn't this confirm" undiagnosable after the fact.
+CREATE TABLE IF NOT EXISTS options_confirmation_log (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    logged_ts         TEXT NOT NULL,
+    watch_level       REAL NOT NULL,
+    watch_direction   TEXT NOT NULL CHECK (watch_direction IN ('UP', 'DOWN')),
+    crossed           INTEGER NOT NULL,
+    sustained         INTEGER NOT NULL,
+    volume_confirmed  INTEGER NOT NULL,
+    oi_classification TEXT,
+    oi_supports       INTEGER NOT NULL,
+    structure_agrees  INTEGER NOT NULL,
+    retest            INTEGER,
+    premium_confirms  INTEGER,
+    confirmed         INTEGER NOT NULL,
+    false_breakout    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_confirmation_log_ts ON options_confirmation_log (logged_ts);
 
 -- Broker-executed automated trades (Phase 17 auto-trading). Deliberately
 -- separate from options_positions above: that table is populated by a human

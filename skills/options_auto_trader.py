@@ -352,13 +352,29 @@ def run_auto_exit_pass(analysis: dict, config: OptionsConfig, now: datetime, tod
 def force_close_stale_positions(config: OptionsConfig, today: date) -> None:
     """EOD safety net (run_end_of_day) on top of the 15:15 in-cycle pass
     and AngelOne's own INTRADAY auto-square-off: closes anything still
-    'open' for today, in case both of those didn't fire for any reason."""
+    'open', in case both of those didn't fire for any reason.
+
+    Deliberately does NOT restrict to trade_date == today: has_open_position()
+    has no date filter either (status='open' only), so a position that
+    somehow survived a prior day's close would otherwise sit 'open' in the
+    DB forever -- silently blocking every future can_open_new_trade() check
+    (at most one open position at a time, by construction) with no trade
+    ever executing again. Automation being intraday-only depends on this
+    never leaving a stale row behind, regardless of which day opened it."""
     if not is_automation_enabled(config):
         return
 
     position = has_open_position()
-    if position is None or position["trade_date"] != today.isoformat():
+    if position is None:
         return
+
+    if position["trade_date"] != today.isoformat():
+        route_message(
+            "monitoring",
+            f"AUTO-TRADE WARNING: force-closing {position['contract']} left open since "
+            f"{position['trade_date']} -- both that day's squareoff and EOD backstop must have failed.",
+            telegram_parse_mode=None,
+        )
 
     current_premium = _fetch_current_premium_live(config, position["symboltoken"])
     _execute_exit(position, "FORCED_SQUAREOFF", current_premium, config, today)
