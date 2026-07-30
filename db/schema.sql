@@ -150,11 +150,67 @@ CREATE TABLE IF NOT EXISTS options_positions (
 CREATE TABLE IF NOT EXISTS options_alerts_sent (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     sent_ts     TEXT NOT NULL,
-    alert_type  TEXT NOT NULL CHECK (alert_type IN ('WATCHING', 'BREACH_UNCONFIRMED', 'FALSE_BREAKOUT')),
+    alert_type  TEXT NOT NULL CHECK (alert_type IN ('WATCHING', 'BREACH_UNCONFIRMED', 'FALSE_BREAKOUT', 'WATCH_ENDED')),
     direction   TEXT CHECK (direction IN ('UP', 'DOWN')),
     level       REAL,
     data_ts     TEXT,
     valid_until TEXT NOT NULL
+);
+
+-- One row per WATCH-mode cycle's evaluate_breakout_confirmation() output
+-- (2026-07-30) -- without this, a watch that times out after 45 minutes
+-- leaves no trace of which of the 5 required conditions (crossed,
+-- sustained, volume_confirmed, oi_supports, structure_agrees) it failed,
+-- making "why didn't this confirm" undiagnosable after the fact.
+CREATE TABLE IF NOT EXISTS options_confirmation_log (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    logged_ts         TEXT NOT NULL,
+    watch_level       REAL NOT NULL,
+    watch_direction   TEXT NOT NULL CHECK (watch_direction IN ('UP', 'DOWN')),
+    crossed           INTEGER NOT NULL,
+    sustained         INTEGER NOT NULL,
+    volume_confirmed  INTEGER NOT NULL,
+    oi_classification TEXT,
+    oi_supports       INTEGER NOT NULL,
+    structure_agrees  INTEGER NOT NULL,
+    retest            INTEGER,
+    premium_confirms  INTEGER,
+    confirmed         INTEGER NOT NULL,
+    false_breakout    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_confirmation_log_ts ON options_confirmation_log (logged_ts);
+
+-- Broker-executed automated trades (Phase 17 auto-trading). Deliberately
+-- separate from options_positions above: that table is populated by a human
+-- replying to a Discord alert (options_position_entry.py) and has no notion
+-- of a broker order id, symboltoken, or dry-run simulation. Keeping this
+-- table distinct means the manual advisory/confirmation flow is untouched.
+CREATE TABLE IF NOT EXISTS auto_options_positions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    status            TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    trade_date        TEXT NOT NULL,
+    contract          TEXT NOT NULL,
+    tradingsymbol     TEXT NOT NULL,
+    symboltoken       TEXT NOT NULL,
+    expiry_date       TEXT NOT NULL,
+    strike            REAL NOT NULL,
+    side              TEXT NOT NULL CHECK (side IN ('CE', 'PE')),
+    qty_lots          INTEGER NOT NULL,
+    lot_size          INTEGER NOT NULL,
+    dry_run           INTEGER NOT NULL DEFAULT 1,
+    entry_order_id    TEXT,
+    entry_premium     REAL,
+    entry_spot        REAL,
+    option_stop       REAL NOT NULL,
+    target_1          REAL NOT NULL,
+    trend_label       TEXT,
+    opened_ts         TEXT NOT NULL DEFAULT (datetime('now')),
+    exit_order_id     TEXT,
+    exit_premium      REAL,
+    exit_reason       TEXT CHECK (exit_reason IN ('TARGET_HIT', 'SL_HIT', 'FORCED_SQUAREOFF')),
+    realized_pnl      REAL,
+    closed_ts         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_lookup ON option_chain_snapshots (trading_date, expiry_date, strike, side);
@@ -162,3 +218,4 @@ CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ts ON option_chain_snapsho
 CREATE INDEX IF NOT EXISTS idx_options_advisories_created ON options_advisories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_options_positions_status ON options_positions (status);
 CREATE INDEX IF NOT EXISTS idx_options_alerts_sent_ts ON options_alerts_sent (sent_ts);
+CREATE INDEX IF NOT EXISTS idx_auto_options_positions_trade_date ON auto_options_positions (trade_date, status);

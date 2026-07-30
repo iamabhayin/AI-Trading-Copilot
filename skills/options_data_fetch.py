@@ -14,6 +14,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.options_config import OptionsConfig
@@ -42,6 +44,25 @@ def fetch_nifty_candles(interval: str = "5m", period: str = "5d"):
     """Intraday NIFTY candles via yfinance (^NSEI), for price-structure /
     swing-high-low analysis in options_analytics.py."""
     return fetch_ohlcv(YF_NIFTY_TICKER, timeframe=interval, period=period)
+
+
+def filter_session_candles(candles: pd.DataFrame, today: date) -> pd.DataFrame:
+    """Trims a multi-day candles fetch down to just `today`'s IST session.
+
+    fetch_nifty_candles's period='5d' is deliberate -- it guarantees
+    ATR(14)/the 20-candle swing lookback have enough history even on the
+    first candle of the day -- but that same multi-day window means
+    detect_swing_levels/compute_atr/detect_price_trend would otherwise
+    read yesterday's candles as if they were today's for roughly the
+    first ~100 minutes of every session (20 x 5m candles), quietly
+    mixing a prior day's structure into today's support/resistance.
+    Support/resistance must be day-wise (rulebook: dynamic, never a
+    stale carryover). No-op if the index isn't a real DatetimeIndex
+    (e.g. synthetic candles in tests)."""
+    if candles is None or candles.empty or not isinstance(candles.index, pd.DatetimeIndex):
+        return candles
+    index = candles.index.tz_convert(IST) if candles.index.tz is not None else candles.index.tz_localize(IST)
+    return candles[index.date == today]
 
 
 def fetch_nifty_spot_backup() -> float | None:

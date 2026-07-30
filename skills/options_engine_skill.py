@@ -54,12 +54,18 @@ from skills.options_analytics import (
     detect_zone_merge,
     years_to_expiry,
 )
+from skills.options_auto_trader import (
+    force_close_stale_positions,
+    maybe_execute_entry,
+    run_auto_exit_pass,
+)
 from skills.options_data_fetch import (
     DataInsufficientError,
     cleanup_old_snapshots,
     fetch_india_vix_with_change,
     fetch_nifty_candles,
     fetch_nifty_spot_backup,
+    filter_session_candles,
 )
 from skills.options_position_monitor import (
     build_position_evidence,
@@ -307,8 +313,12 @@ def fetch_cycle_data(config: OptionsConfig, today: date) -> dict:
     if cycle.get("greeks_sanity_checked"):
         mark_greeks_sanity_checked(today)
 
-    candles_5m = fetch_nifty_candles(interval="5m", period="5d")
-    candles_1m = fetch_nifty_candles(interval="1m", period="1d")
+    # period='5d'/'1d' fetches deliberately span multiple days for enough
+    # ATR/swing-lookback history -- filter_session_candles trims each back
+    # to just `today` right after the fetch so no downstream analytics
+    # (S/R, ATR, trend) ever reads yesterday's candles as today's.
+    candles_5m = filter_session_candles(fetch_nifty_candles(interval="5m", period="5d"), today)
+    candles_1m = filter_session_candles(fetch_nifty_candles(interval="1m", period="1d"), today)
 
     return {
         "spot": cycle["spot"],
@@ -524,6 +534,7 @@ def format_watch_escalation_message(
         "",
         f"Spot: {spot:,.2f} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
         f"Level: {level:g} {side}",
+        "\U0001F512 Locked for this watch -- confirmation tracks this exact level only, even if OI walls shift elsewhere before it resolves",
         f"Direction if confirmed: {outcome}",
         "",
         *_build_rich_alert_body(level, direction, spot, analysis, chain, previous_snapshot, confirmation, config),
@@ -583,6 +594,7 @@ def format_breach_unconfirmed_message(
         f"\U0001F7E0 LEVEL BREACHED -- AWAITING CONFIRMATION ({side.upper()})",
         "",
         f"Spot: {spot:,.2f} already past {level:g} {side} ({distance_pts:+.2f} pts / {distance_pct:+.2f}%)",
+        "\U0001F512 Locked for this watch -- confirmation tracks this exact level only, even if OI walls shift elsewhere before it resolves",
         f"Direction if confirmed: {outcome}",
         "",
         *_build_rich_alert_body(level, direction, spot, analysis, chain, previous_snapshot, confirmation, config),
@@ -642,6 +654,30 @@ def notify_false_breakout(level: float, direction: str, confirmation: dict, vali
     route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
 
 
+def format_watch_deescalated_message(
+    level: float, direction: str, reason: str, valid_until: datetime | None = None
+) -> str:
+    """Sent when a WATCH ends without confirming (price drifted away or
+    timed out) -- previously silent, which made an unrelated new WATCH
+    on a different level (e.g. a fresh OI wall) look like the engine had
+    changed its mind about the same level rather than closed out this
+    one and moved on."""
+    side = "resistance" if direction == "UP" else "support"
+    lines = [
+        f"⚪ WATCH ENDED -- {level:g} {side}",
+        "",
+        f"Reason: {reason}",
+        "No confirmation reached; back to scanning for the next level in proximity.",
+        *_format_valid_until(valid_until),
+    ]
+    return "\n".join(lines)
+
+
+def notify_watch_deescalated(level: float, direction: str, reason: str, valid_until: datetime | None = None) -> None:
+    text = format_watch_deescalated_message(level, direction, reason, valid_until)
+    route_message("option_trading", text, send_telegram=False, telegram_parse_mode=None)
+
+
 # --------------------------------------------------------------------------
 # Alert staleness fix -- fresh-spot re-check + valid_until (Part A1/A2/A3)
 # --------------------------------------------------------------------------
@@ -664,6 +700,33 @@ def compute_valid_until(now: datetime, next_mode: str) -> datetime:
     runs 1-min cadence, NORMAL mode 5-min (Part A3)."""
     minutes = 1 if next_mode == "WATCH" else 5
     return now + timedelta(minutes=minutes)
+
+
+def record_confirmation_snapshot(watch_level: float, watch_direction: str, confirmation: dict, now: datetime) -> None:
+    """One row per WATCH-mode cycle's evaluate_breakout_confirmation()
+    result -- lets a stalled/timed-out watch be diagnosed after the fact
+    (which of the 5 required conditions never lit up) instead of just
+    knowing it didn't confirm."""
+    execute(
+        """INSERT INTO options_confirmation_log
+        (logged_ts, watch_level, watch_direction, crossed, sustained, volume_confirmed,
+         oi_classification, oi_supports, structure_agrees, retest, premium_confirms,
+         confirmed, false_breakout)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            now.isoformat(), watch_level, watch_direction,
+            int(confirmation.get("crossed", False)),
+            int(confirmation.get("sustained", False)),
+            int(confirmation.get("volume_confirmed", False)),
+            confirmation.get("oi_classification"),
+            int(confirmation.get("oi_supports", False)),
+            int(confirmation.get("structure_agrees", False)),
+            confirmation.get("retest"),
+            confirmation.get("premium_confirms"),
+            int(confirmation.get("confirmed", False)),
+            int(confirmation.get("false_breakout", False)),
+        ),
+    )
 
 
 def record_alert_sent(alert_type: str, direction: str | None, level: float | None, data_ts: str | None, valid_until: datetime) -> None:
@@ -714,6 +777,19 @@ def _handle_false_breakout(engine_state: dict, confirmation: dict, now: datetime
     valid_until = compute_valid_until(now, "NORMAL")
     notify_false_breakout(engine_state["watch_level"], engine_state["watch_direction"], confirmation, valid_until)
     record_alert_sent("FALSE_BREAKOUT", engine_state["watch_direction"], engine_state["watch_level"], None, valid_until)
+
+
+def _handle_deescalation(engine_state: dict, reason: str, now: datetime) -> None:
+    """WATCH -> NORMAL without confirming. Only fires for a level that
+    actually reached WATCH (escalating straight back out of NORMAL is a
+    no-op with no prior watch_level to report on)."""
+    level = engine_state.get("watch_level")
+    direction = engine_state.get("watch_direction")
+    if level is None or direction is None:
+        return
+    valid_until = compute_valid_until(now, "NORMAL")
+    notify_watch_deescalated(level, direction, reason, valid_until)
+    record_alert_sent("WATCH_ENDED", direction, level, None, valid_until)
 
 
 # --------------------------------------------------------------------------
@@ -847,6 +923,7 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
                 config=config,
                 premium_history=premium_history,
             )
+            record_confirmation_snapshot(watch_level, direction, confirmation, now)
 
         transition = decide_transition(
             engine_state, spot, analysis["support_resistance"], now, config, atr=atr, confirmation=confirmation
@@ -856,12 +933,15 @@ def run_cycle(config: OptionsConfig, now: datetime | None = None) -> dict:
         action = transition["action"]
         if action == "ESCALATE":
             _handle_escalation(transition["next_state"], spot, analysis, cycle_data, now, previous_snapshot, config)
+        elif action == "DEESCALATE":
+            _handle_deescalation(engine_state, transition["reason"], now)
         elif action == "FALSE_BREAKOUT":
             _handle_false_breakout(engine_state, confirmation, now)
         elif action == "CONFIRMED":
             _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analysis, confirmation, spot, atr, regime, now, config, today)
 
         run_position_monitor_pass(analysis, spot, config, today)
+        run_auto_exit_pass(analysis, config, now, today)
 
         return {"status": "ok", "action": action, "regime": regime}
     finally:
@@ -996,6 +1076,7 @@ def _handle_confirmed(engine_state, chain, previous_snapshot, cycle_data, analys
 
     if result["action"] in ("BUY_CE_CANDIDATE", "BUY_PE_CANDIDATE"):
         notify_advisory(payload)
+        maybe_execute_entry(payload, cycle_data["contracts"], config, today)
 
 
 # --------------------------------------------------------------------------
@@ -1074,6 +1155,7 @@ def run_end_of_day(config: OptionsConfig, today: date | None = None) -> dict:
         "UPDATE options_engine_state SET mode = 'NORMAL', watch_level = NULL, watch_direction = NULL, "
         "watch_started_ts = NULL, greeks_sanity_checked_date = NULL, updated_ts = datetime('now') WHERE id = 1"
     )
+    force_close_stale_positions(config, today or datetime.now(IST).date())
     return {"status": "ok", "snapshots_deleted": deleted}
 
 
